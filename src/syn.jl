@@ -4,8 +4,9 @@
 #
 # SyN uses a velocity field parameterization with scaling-and-squaring for
 # guaranteed diffeomorphic (smooth, invertible) transformations.
-
-using NNlib
+#
+# Note: Uses our pure Julia grid_sample instead of NNlib.grid_sample to enable
+# proper AD differentiation through the entire computation graph.
 
 # Note: _constant() is defined in utils.jl
 
@@ -61,10 +62,10 @@ Warp image `x` using velocity/displacement field `v`.
 - Warped image of same shape as `x`
 
 # Notes
-- Uses NNlib.grid_sample for bilinear interpolation
+- Uses our pure Julia grid_sample for bilinear interpolation
 - Grid coordinates are: new_pos = id_grid + v
 - The velocity field `v` should be in normalized coordinates (same scale as grid)
-- Uses `:reflection` padding mode to match torchreg behavior
+- Uses `:border` padding mode (NNlib doesn't support :reflection)
 
 # Implementation Details
 The spatial transform applies a displacement field to warp an image:
@@ -102,10 +103,9 @@ function spatial_transform(
     end
     grid = grid .+ v_perm  # (3, X, Y, Z, N)
 
-    # NNlib.grid_sample expects grid of shape (3, X, Y, Z, N)
+    # Our pure Julia grid_sample expects grid of shape (3, X, Y, Z, N)
     # and input of shape (X, Y, Z, C, N)
-    # Note: NNlib doesn't have :reflection mode, use :border instead
-    result = NNlib.grid_sample(x, grid; padding_mode=:border)
+    result = grid_sample(x, grid; padding_mode=:border)
 
     return result
 end
@@ -866,14 +866,14 @@ function _syn_gradient_direct(
         get_identity_grid((X, Y, Z), T)
     end
 
-    # Gradient through full image warps using NNlib.∇grid_sample
+    # Gradient through full image warps using our pure Julia ∇grid_sample
     # yx_full comes from spatial_transform(static, flow_yx_full)
     # So we need gradient w.r.t. flow_yx_full
     full_grid_yx = _constant() do
         repeat(reshape(id_grid, 3, X, Y, Z, 1), 1, 1, 1, 1, N)
     end .+ permutedims(result.flows.yx_full, (4, 1, 2, 3, 5))
 
-    _, d_grid_yx_full = NNlib.∇grid_sample(d_yx_full, static, full_grid_yx; padding_mode=:border)
+    _, d_grid_yx_full = ∇grid_sample(d_yx_full, static, full_grid_yx; padding_mode=:border)
     d_flow_yx_full = permutedims(d_grid_yx_full, (2, 3, 4, 1, 5))
 
     # Similarly for xy_full
@@ -881,7 +881,7 @@ function _syn_gradient_direct(
         repeat(reshape(id_grid, 3, X, Y, Z, 1), 1, 1, 1, 1, N)
     end .+ permutedims(result.flows.xy_full, (4, 1, 2, 3, 5))
 
-    _, d_grid_xy_full = NNlib.∇grid_sample(d_xy_full, moving, full_grid_xy; padding_mode=:border)
+    _, d_grid_xy_full = ∇grid_sample(d_xy_full, moving, full_grid_xy; padding_mode=:border)
     d_flow_xy_full = permutedims(d_grid_xy_full, (2, 3, 4, 1, 5))
 
     # For now, use flow gradients as approximate velocity gradients

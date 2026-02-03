@@ -2868,3 +2868,114 @@ The CI includes a diagnostic step that:
 3. **Diagnostic vs hard failure**: The GPU diagnostic reports availability but doesn't fail CI if Metal is unavailable, since this may be a CI environment limitation rather than a code issue.
 
 ---
+
+## [FIX-GRID-001] Replace NNlib.grid_sample with pure Julia implementation
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+### Summary
+
+Replaced NNlib.grid_sample with a pure Julia implementation to enable proper automatic differentiation. NNlib.grid_sample uses internal threading which breaks ALL Julia AD systems (Enzyme, Mooncake, Zygote). Our pure Julia implementation is fully differentiable.
+
+### Files Created/Modified
+
+1. **src/grid_sample.jl** (NEW):
+   - Pure Julia `grid_sample` for 2D (bilinear) and 3D (trilinear) interpolation
+   - Pure Julia `∇grid_sample` for gradient computation
+   - Supports `padding_mode=:zeros` and `padding_mode=:border`
+   - Matches PyTorch F.grid_sample output within rtol=1e-5
+
+2. **src/MedicalImageRegistration.jl**:
+   - Added `include("grid_sample.jl")` before utils.jl
+   - Updated documentation about grid_sample
+
+3. **src/affine.jl**:
+   - Changed `NNlib.grid_sample` → `grid_sample` (our implementation)
+   - Changed `NNlib.∇grid_sample` → `∇grid_sample` (our implementation)
+
+4. **src/syn.jl**:
+   - Changed `NNlib.grid_sample` → `grid_sample` (our implementation)
+   - Changed `NNlib.∇grid_sample` → `∇grid_sample` (our implementation)
+
+5. **src/utils.jl**:
+   - Updated docstrings referencing NNlib.grid_sample
+
+6. **test/test_utils.jl**:
+   - Added comprehensive tests for pure Julia grid_sample
+   - Added PyTorch F.grid_sample parity tests for 2D and 3D
+   - Tests for identity grid, translation, padding modes
+
+### Implementation Details
+
+The pure Julia grid_sample implementation:
+
+```julia
+function grid_sample(input::AbstractArray{T, 5}, grid::AbstractArray{T, 5};
+                     padding_mode::Symbol=:zeros) where T
+    # For each output position:
+    # 1. Get normalized [-1, 1] coordinates from grid
+    # 2. Convert to pixel coordinates [1, size]
+    # 3. Perform trilinear interpolation
+    # 4. Handle boundary with padding_mode
+end
+```
+
+**Coordinate conversion** (align_corners=true semantics):
+```julia
+x = (x_norm + 1) * 0.5 * (X_in - 1) + 1
+```
+
+**Trilinear interpolation**:
+- Computes 8 corner values (v000, v100, v010, v110, v001, v101, v011, v111)
+- Weights based on fractional position (wx0, wx1, wy0, wy1, wz0, wz1)
+- Result = weighted sum of all 8 corners
+
+**Gradient computation**:
+- `∇grid_sample` computes gradients w.r.t. both input and grid
+- Uses scatter operations for input gradient
+- Uses interpolation derivatives for grid gradient
+
+### Test Results
+
+All 133 tests pass:
+
+| Test Suite | Tests | Result |
+|------------|-------|--------|
+| Array Conversion Utilities | 13 | ✅ Pass |
+| Utility Function Tests | 43 | ✅ Pass |
+| Pure Julia grid_sample Tests | 20 | ✅ Pass |
+| PyTorch Parity Tests | 22 | ✅ Pass |
+| Integration Tests | 35 | ✅ Pass |
+
+### PyTorch Parity Verification
+
+Our grid_sample matches PyTorch F.grid_sample within rtol=1e-5:
+- 2D identity grid: ✅
+- 3D identity grid: ✅
+- 2D with translation: ✅
+- 3D with translation: ✅
+- padding_mode=:zeros: ✅
+- padding_mode=:border: ✅
+
+### Acceptance Criteria Verification
+
+- ✅ New grid_sample function in src/grid_sample.jl (pure Julia, NO threading)
+- ✅ Matches PyTorch F.grid_sample output within rtol=1e-5
+- ✅ Supports bilinear (2D) and trilinear (3D) interpolation
+- ✅ Supports padding_mode :zeros and :border
+- ✅ Parity tests pass against PyTorch F.grid_sample
+- ⏳ NNlib still in Project.toml (needed for batched_mul, conv) - will be evaluated in FIX-AD-002
+
+### Notes
+
+1. **NNlib still required**: NNlib is still needed for `batched_mul` and `conv` operations, which don't have threading issues. Only grid_sample was problematic.
+
+2. **Performance**: Pure Julia grid_sample is slightly slower than NNlib's threaded version for large arrays, but the benefit is full AD compatibility.
+
+3. **GPU support**: The pure Julia implementation works on GPU arrays via standard array operations. For better GPU performance, consider adding KernelAbstractions.jl kernels in a future enhancement.
+
+4. **Next step**: FIX-AD-002 will replace manual gradients with Mooncake AD now that grid_sample is pure Julia.
+
+---

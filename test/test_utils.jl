@@ -279,6 +279,119 @@ const F = pyimport("torch.nn.functional")
     end
 end
 
+# Import our pure Julia grid_sample
+using MedicalImageRegistration: grid_sample, ∇grid_sample
+
+@testset "Pure Julia grid_sample Tests" begin
+    @testset "2D grid_sample basic functionality" begin
+        # Create simple test input: (X=4, Y=4, C=1, N=1)
+        input = Float32.(reshape(1:16, 4, 4, 1, 1))
+
+        # Identity grid: should return input unchanged
+        grid = create_identity_grid((4, 4), Float32)
+        grid_4d = reshape(grid, 2, 4, 4, 1)
+
+        output = grid_sample(input, grid_4d; padding_mode=:border)
+        @test size(output) == (4, 4, 1, 1)
+        @test output ≈ input rtol=1e-5
+    end
+
+    @testset "3D grid_sample basic functionality" begin
+        # Create simple test input: (X=4, Y=4, Z=4, C=1, N=1)
+        input = Float32.(reshape(1:64, 4, 4, 4, 1, 1))
+
+        # Identity grid: should return input unchanged
+        grid = create_identity_grid((4, 4, 4), Float32)
+        grid_5d = reshape(grid, 3, 4, 4, 4, 1)
+
+        output = grid_sample(input, grid_5d; padding_mode=:border)
+        @test size(output) == (4, 4, 4, 1, 1)
+        @test output ≈ input rtol=1e-5
+    end
+
+    @testset "2D grid_sample padding modes" begin
+        # Create test input
+        input = randn(Float32, 8, 8, 2, 1)
+
+        # Grid that samples out of bounds
+        grid = create_identity_grid((8, 8), Float32)
+        grid_4d = reshape(grid, 2, 8, 8, 1)
+        # Shift grid to sample outside bounds
+        grid_shifted = copy(grid_4d)
+        grid_shifted[1, :, :, :] .+= 1.5f0  # shift x by 1.5 (out of bounds)
+
+        # With :zeros, out-of-bounds should be zero
+        output_zeros = grid_sample(input, grid_shifted; padding_mode=:zeros)
+        @test !any(isnan.(output_zeros))
+
+        # With :border, out-of-bounds should clamp
+        output_border = grid_sample(input, grid_shifted; padding_mode=:border)
+        @test !any(isnan.(output_border))
+
+        # The two should be different
+        @test output_zeros != output_border
+    end
+
+    @testset "3D grid_sample padding modes" begin
+        input = randn(Float32, 8, 8, 8, 2, 1)
+
+        grid = create_identity_grid((8, 8, 8), Float32)
+        grid_5d = reshape(grid, 3, 8, 8, 8, 1)
+        grid_shifted = copy(grid_5d)
+        grid_shifted[1, :, :, :, :] .+= 1.5f0
+
+        output_zeros = grid_sample(input, grid_shifted; padding_mode=:zeros)
+        output_border = grid_sample(input, grid_shifted; padding_mode=:border)
+
+        @test !any(isnan.(output_zeros))
+        @test !any(isnan.(output_border))
+        @test output_zeros != output_border
+    end
+
+    @testset "grid_sample batch support" begin
+        # Test with batch size > 1
+        input = randn(Float32, 8, 8, 8, 1, 3)  # batch of 3
+        grid = create_identity_grid((8, 8, 8), Float32)
+        grid_5d = cat([reshape(grid, 3, 8, 8, 8, 1) for _ in 1:3]..., dims=5)  # (3, 8, 8, 8, 3)
+
+        output = grid_sample(input, grid_5d; padding_mode=:border)
+        @test size(output) == (8, 8, 8, 1, 3)
+        @test output ≈ input rtol=1e-5
+    end
+
+    @testset "∇grid_sample 2D gradient correctness" begin
+        input = randn(Float32, 6, 6, 1, 1)
+        grid = create_identity_grid((6, 6), Float32)
+        grid_4d = reshape(grid, 2, 6, 6, 1)
+
+        output = grid_sample(input, grid_4d; padding_mode=:border)
+        dy = ones(Float32, size(output)...)
+
+        d_input, d_grid = ∇grid_sample(dy, input, grid_4d; padding_mode=:border)
+
+        @test size(d_input) == size(input)
+        @test size(d_grid) == size(grid_4d)
+        @test !any(isnan.(d_input))
+        @test !any(isnan.(d_grid))
+    end
+
+    @testset "∇grid_sample 3D gradient correctness" begin
+        input = randn(Float32, 6, 6, 6, 1, 1)
+        grid = create_identity_grid((6, 6, 6), Float32)
+        grid_5d = reshape(grid, 3, 6, 6, 6, 1)
+
+        output = grid_sample(input, grid_5d; padding_mode=:border)
+        dy = ones(Float32, size(output)...)
+
+        d_input, d_grid = ∇grid_sample(dy, input, grid_5d; padding_mode=:border)
+
+        @test size(d_input) == size(input)
+        @test size(d_grid) == size(grid_5d)
+        @test !any(isnan.(d_input))
+        @test !any(isnan.(d_grid))
+    end
+end
+
 @testset "PyTorch Parity Tests" begin
     @testset "affine_grid vs F.affine_grid" begin
         # Compare our affine_grid against PyTorch's F.affine_grid
@@ -336,5 +449,143 @@ end
             cz = (kz + 1) ÷ 2
             @test julia_kernel[cx, cy, cz] == maximum(julia_kernel)
         end
+    end
+
+    @testset "grid_sample vs F.grid_sample 2D parity" begin
+        # Test our pure Julia grid_sample against PyTorch F.grid_sample for 2D
+
+        for (X, Y, C, N) in [(8, 8, 1, 1), (10, 12, 2, 2)]
+            # Create random input and grid
+            julia_input = randn(Float32, X, Y, C, N)
+
+            # Create identity grid
+            julia_grid = create_identity_grid((X, Y), Float32)
+            julia_grid_4d = cat([reshape(julia_grid, 2, X, Y, 1) for _ in 1:N]..., dims=4)
+
+            # Our implementation
+            julia_output = grid_sample(julia_input, julia_grid_4d; padding_mode=:border)
+
+            # PyTorch implementation
+            # Convert input: Julia (X, Y, C, N) -> PyTorch (N, C, Y, X)
+            torch_input = julia_to_torch(julia_input)
+
+            # Convert grid: Julia (2, X, Y, N) -> PyTorch (N, Y, X, 2)
+            # Julia grid is (2, X, Y, N) where dim 1 is (x, y)
+            # PyTorch grid_sample expects (N, H, W, 2) where last dim is (x, y)
+            julia_grid_permuted = permutedims(julia_grid_4d, (3, 2, 1, 4))  # (Y, X, 2, N)
+            julia_grid_permuted = permutedims(julia_grid_permuted, (4, 1, 2, 3))  # (N, Y, X, 2)
+            torch_grid = torch.from_numpy(np.ascontiguousarray(julia_grid_permuted))
+
+            torch_output = F.grid_sample(
+                torch_input, torch_grid,
+                mode="bilinear",
+                padding_mode="border",
+                align_corners=true
+            )
+
+            # Compare results
+            @test compare_results(julia_output, torch_output; rtol=1e-5)
+        end
+    end
+
+    @testset "grid_sample vs F.grid_sample 3D parity" begin
+        # Test our pure Julia grid_sample against PyTorch F.grid_sample for 3D
+
+        for (X, Y, Z, C, N) in [(7, 7, 7, 1, 1), (8, 9, 10, 2, 2)]
+            # Create random input
+            julia_input = randn(Float32, X, Y, Z, C, N)
+
+            # Create identity grid
+            julia_grid = create_identity_grid((X, Y, Z), Float32)
+            julia_grid_5d = cat([reshape(julia_grid, 3, X, Y, Z, 1) for _ in 1:N]..., dims=5)
+
+            # Our implementation
+            julia_output = grid_sample(julia_input, julia_grid_5d; padding_mode=:border)
+
+            # PyTorch implementation
+            # Convert input: Julia (X, Y, Z, C, N) -> PyTorch (N, C, Z, Y, X)
+            torch_input = julia_to_torch(julia_input)
+
+            # Convert grid: Julia (3, X, Y, Z, N) -> PyTorch (N, Z, Y, X, 3)
+            # Julia grid is (3, X, Y, Z, N) where dim 1 is (x, y, z)
+            # PyTorch grid_sample expects (N, D, H, W, 3) where last dim is (x, y, z)
+            julia_grid_permuted = permutedims(julia_grid_5d, (4, 3, 2, 1, 5))  # (Z, Y, X, 3, N)
+            julia_grid_permuted = permutedims(julia_grid_permuted, (5, 1, 2, 3, 4))  # (N, Z, Y, X, 3)
+            torch_grid = torch.from_numpy(np.ascontiguousarray(julia_grid_permuted))
+
+            torch_output = F.grid_sample(
+                torch_input, torch_grid,
+                mode="bilinear",
+                padding_mode="border",
+                align_corners=true
+            )
+
+            # Compare results
+            @test compare_results(julia_output, torch_output; rtol=1e-5)
+        end
+    end
+
+    @testset "grid_sample translation parity" begin
+        # Test with a translated grid to ensure non-trivial sampling works
+        X, Y, Z = 8, 8, 8
+        C, N = 1, 1
+
+        julia_input = randn(Float32, X, Y, Z, C, N)
+
+        # Create grid with small translation
+        julia_grid = create_identity_grid((X, Y, Z), Float32)
+        julia_grid_5d = reshape(julia_grid, 3, X, Y, Z, 1)
+        julia_grid_5d = copy(julia_grid_5d)
+        julia_grid_5d[1, :, :, :, :] .+= 0.1f0  # translate x by 0.1
+
+        # Our implementation
+        julia_output = grid_sample(julia_input, julia_grid_5d; padding_mode=:border)
+
+        # PyTorch implementation
+        torch_input = julia_to_torch(julia_input)
+        julia_grid_permuted = permutedims(julia_grid_5d, (4, 3, 2, 1, 5))
+        julia_grid_permuted = permutedims(julia_grid_permuted, (5, 1, 2, 3, 4))
+        torch_grid = torch.from_numpy(np.ascontiguousarray(julia_grid_permuted))
+
+        torch_output = F.grid_sample(
+            torch_input, torch_grid,
+            mode="bilinear",
+            padding_mode="border",
+            align_corners=true
+        )
+
+        @test compare_results(julia_output, torch_output; rtol=1e-5)
+    end
+
+    @testset "grid_sample zeros padding parity" begin
+        # Test :zeros padding mode
+        X, Y, Z = 8, 8, 8
+        C, N = 1, 1
+
+        julia_input = randn(Float32, X, Y, Z, C, N)
+
+        # Grid that goes out of bounds
+        julia_grid = create_identity_grid((X, Y, Z), Float32)
+        julia_grid_5d = reshape(julia_grid, 3, X, Y, Z, 1)
+        julia_grid_5d = copy(julia_grid_5d)
+        julia_grid_5d[1, :, :, :, :] .+= 0.5f0  # some sampling will be out of bounds
+
+        # Our implementation
+        julia_output = grid_sample(julia_input, julia_grid_5d; padding_mode=:zeros)
+
+        # PyTorch implementation
+        torch_input = julia_to_torch(julia_input)
+        julia_grid_permuted = permutedims(julia_grid_5d, (4, 3, 2, 1, 5))
+        julia_grid_permuted = permutedims(julia_grid_permuted, (5, 1, 2, 3, 4))
+        torch_grid = torch.from_numpy(np.ascontiguousarray(julia_grid_permuted))
+
+        torch_output = F.grid_sample(
+            torch_input, torch_grid,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=true
+        )
+
+        @test compare_results(julia_output, torch_output; rtol=1e-5)
     end
 end

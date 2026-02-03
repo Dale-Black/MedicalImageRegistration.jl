@@ -135,7 +135,7 @@ Create a 2D sampling grid by applying affine transformation to identity grid.
 - `spatial_size`: Tuple `(X, Y)` specifying output grid spatial dimensions.
 
 # Returns
-- Grid of shape `(2, X, Y, N)` suitable for `NNlib.grid_sample`.
+- Grid of shape `(2, X, Y, N)` suitable for `grid_sample`.
 
 # Notes
 - Coordinates are normalized to [-1, 1] range (align_corners=true semantics).
@@ -173,7 +173,7 @@ function affine_grid(theta::AbstractArray{T, 3}, spatial_size::NTuple{2, Int}) w
     homogeneous_batch = repeat(reshape(homogeneous_grid, ndim + 1, num_points, 1), 1, 1, N)
     output_grid = NNlib.batched_mul(theta, homogeneous_batch)
 
-    # Reshape to (2, X, Y, N) for NNlib.grid_sample
+    # Reshape to (2, X, Y, N) for grid_sample
     return reshape(output_grid, ndim, X, Y, N)
 end
 
@@ -188,7 +188,7 @@ Create a 3D sampling grid by applying affine transformation to identity grid.
 - `spatial_size`: Tuple `(X, Y, Z)` specifying output grid spatial dimensions.
 
 # Returns
-- Grid of shape `(3, X, Y, Z, N)` suitable for `NNlib.grid_sample`.
+- Grid of shape `(3, X, Y, Z, N)` suitable for `grid_sample`.
 
 # Notes
 - Coordinates are normalized to [-1, 1] range (align_corners=true semantics).
@@ -224,7 +224,7 @@ function affine_grid(theta::AbstractArray{T, 3}, spatial_size::NTuple{3, Int}) w
     homogeneous_batch = repeat(reshape(homogeneous_grid, ndim + 1, num_points, 1), 1, 1, N)
     output_grid = NNlib.batched_mul(theta, homogeneous_batch)
 
-    # Reshape to (3, X, Y, Z, N) for NNlib.grid_sample
+    # Reshape to (3, X, Y, Z, N) for grid_sample
     return reshape(output_grid, ndim, X, Y, Z, N)
 end
 

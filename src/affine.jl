@@ -486,7 +486,7 @@ y_small = affine_transform(x, affine; shape=(32, 32, 32))
 
 # Notes
 - Uses `affine_grid` to create sampling grid from affine matrix
-- Uses `NNlib.grid_sample` for bilinear/trilinear interpolation
+- Uses our pure Julia `grid_sample` for bilinear/trilinear interpolation
 - Coordinates are in normalized [-1, 1] range
 """
 function affine_transform(
@@ -505,9 +505,8 @@ function affine_transform(
     # Create sampling grid from affine transformation
     grid = affine_grid(affine, out_shape)  # (2, X_out, Y_out, N)
 
-    # Use NNlib.grid_sample for interpolation
-    # NNlib expects grid with coordinates in first dimension
-    result = NNlib.grid_sample(x, grid; padding_mode=padding_mode)
+    # Use our pure Julia grid_sample for interpolation
+    result = grid_sample(x, grid; padding_mode=padding_mode)
 
     return result
 end
@@ -528,8 +527,8 @@ function affine_transform(
     # Create sampling grid from affine transformation
     grid = affine_grid(affine, out_shape)  # (3, X_out, Y_out, Z_out, N)
 
-    # Use NNlib.grid_sample for interpolation
-    result = NNlib.grid_sample(x, grid; padding_mode=padding_mode)
+    # Use our pure Julia grid_sample for interpolation
+    result = grid_sample(x, grid; padding_mode=padding_mode)
 
     return result
 end
@@ -759,8 +758,8 @@ function _compute_affine_gradients(
     # 2. Create sampling grid
     grid = affine_grid(affine, target_shape)
 
-    # 3. Sample moving image at grid positions
-    moved = NNlib.grid_sample(moving, grid; padding_mode=padding_mode)
+    # 3. Sample moving image at grid positions (using our pure Julia grid_sample)
+    moved = grid_sample(moving, grid; padding_mode=padding_mode)
 
     # 4. Compute loss (MSE for now, which has simple gradient)
     # For MSE: loss = mean((moved - static)^2)
@@ -771,8 +770,8 @@ function _compute_affine_gradients(
     # 1. Gradient of MSE loss: d_moved = 2 * (moved - static) / numel
     d_moved = T(2) .* diff ./ T(length(moved))
 
-    # 2. Gradient through grid_sample using NNlib.∇grid_sample
-    _, d_grid = NNlib.∇grid_sample(d_moved, moving, grid; padding_mode=padding_mode)
+    # 2. Gradient through grid_sample using our pure Julia ∇grid_sample
+    _, d_grid = ∇grid_sample(d_moved, moving, grid; padding_mode=padding_mode)
 
     # 3. Gradient through affine_grid
     d_affine = _affine_grid_backward(d_grid, target_shape, batch_size)
