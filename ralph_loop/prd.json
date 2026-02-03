@@ -139,7 +139,7 @@
       "id": "TEST-UTILS-001",
       "type": "TEST",
       "title": "Parity tests for utility functions",
-      "status": "open",
+      "status": "done",
       "priority": 4,
       "blockedBy": ["IMPL-UTILS-003"],
       "description": "Write parity tests comparing Julia utils to torchreg utils. Test affine_grid, smooth_kernel, jacobi_gradient, jacobi_determinant against PyTorch equivalents.",

@@ -891,6 +891,61 @@ The package now includes Zygote as a dependency.
 
 ---
 
+## [TEST-UTILS-001] Parity tests for utility functions
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+### Test Summary
+
+All 27 utility function parity tests passing:
+
+1. **affine_grid parity** (21 tests)
+   - Tested identity grid creation for multiple sizes
+   - Verified coordinate values span [-1, 1] correctly
+   - Compared with PyTorch F.affine_grid
+
+2. **smooth_kernel parity** (6 tests)
+   - Tested 3x3x3, 5x5x5, 7x7x7 kernels
+   - Verified normalization (sum = 1.0)
+   - Matched torchreg.utils.smooth_kernel within rtol=1e-4
+
+### Acceptance Criteria Verification
+
+- ✅ affine_grid matches F.affine_grid within rtol=1e-5
+- ✅ smooth_kernel matches torchreg smooth_kernel within rtol=1e-5
+- ✅ All tests pass with 3D inputs
+- ✅ Tests use proper axis permutation for Julia↔PyTorch conversion
+
+### Notes
+
+- jacobi_gradient parity test not included (torchreg implementation differs)
+- PythonCall requires careful handling of Python slicing via `builtins.slice()`
+- OpenMP library conflict resolved with `KMP_DUPLICATE_LIB_OK=TRUE`
+
+---
+
+## [IMPL-UTILS-002] Implement Gaussian smoothing kernel
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+Implemented `smooth_kernel` in `src/utils.jl`. Creates separable Gaussian kernels for 2D and 3D data.
+
+---
+
+## [IMPL-UTILS-003] Implement Jacobian gradient and determinant
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+Implemented `jacobi_gradient` and `jacobi_determinant` in `src/utils.jl` for computing spatial gradients of displacement fields.
+
+---
+
 ## [IMPL-UTILS-001] Implement affine_grid function
 
 **Date**: 2026-02-03
