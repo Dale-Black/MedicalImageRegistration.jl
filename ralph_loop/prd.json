@@ -439,7 +439,7 @@
       "id": "CLEANUP-001",
       "type": "IMPL",
       "title": "Final cleanup and export verification",
-      "status": "open",
+      "status": "done",
       "priority": 15,
       "blockedBy": ["TEST-INTEGRATION-001"],
       "description": "Final pass: verify all exports work, remove any TODO comments, ensure consistent code style, verify package loads cleanly.",
