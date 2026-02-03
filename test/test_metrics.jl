@@ -128,10 +128,57 @@ using Random
     end
 
     @testset "LinearElasticity Regularizer" begin
-        Random.seed!(456)
+        torchreg_utils = pyimport("torchreg.utils")
 
-        # Note: LinearElasticity has axis convention differences with torchreg
-        # Tests verify correct behavior, not exact parity
+        @testset "parity with torchreg (cubic)" begin
+            np.random.seed(42)
+
+            for sz in [8, 16]
+                u_torch = torch.tensor(np.random.randn(1, sz, sz, sz, 3).astype(np.float32))
+                u_julia = permutedims(pyconvert(Array{Float32}, u_torch.numpy()), (4, 3, 2, 5, 1))
+
+                julia_reg = LinearElasticity(mu=2.0f0, lam=1.0f0)
+                torch_reg = torchreg_metrics.LinearElasticity(mu=2.0, lam=1.0)
+
+                julia_result = julia_reg(u_julia)
+                torch_result = Float32(pyconvert(Float64, torch_reg(u_torch).item()))
+
+                @test isapprox(julia_result, torch_result, rtol=1e-4)
+            end
+        end
+
+        @testset "parity with torchreg (non-cubic)" begin
+            np.random.seed(42)
+
+            for (X, Y, Z) in [(10, 12, 14), (6, 8, 10)]
+                u_torch = torch.tensor(np.random.randn(1, Z, Y, X, 3).astype(np.float32))
+                u_julia = permutedims(pyconvert(Array{Float32}, u_torch.numpy()), (4, 3, 2, 5, 1))
+
+                julia_reg = LinearElasticity(mu=2.0f0, lam=1.0f0)
+                torch_reg = torchreg_metrics.LinearElasticity(mu=2.0, lam=1.0)
+
+                julia_result = julia_reg(u_julia)
+                torch_result = Float32(pyconvert(Float64, torch_reg(u_torch).item()))
+
+                @test isapprox(julia_result, torch_result, rtol=1e-4)
+            end
+        end
+
+        @testset "parity with different mu/lam" begin
+            np.random.seed(123)
+            u_torch = torch.tensor(np.random.randn(1, 8, 8, 8, 3).astype(np.float32))
+            u_julia = permutedims(pyconvert(Array{Float32}, u_torch.numpy()), (4, 3, 2, 5, 1))
+
+            for (mu, lam) in [(1.0, 1.0), (2.0, 1.0), (0.5, 2.0), (3.0, 0.5)]
+                julia_reg = LinearElasticity(mu=Float32(mu), lam=Float32(lam))
+                torch_reg = torchreg_metrics.LinearElasticity(mu=mu, lam=lam)
+
+                julia_result = julia_reg(u_julia)
+                torch_result = Float32(pyconvert(Float64, torch_reg(u_torch).item()))
+
+                @test isapprox(julia_result, torch_result, rtol=1e-4)
+            end
+        end
 
         @testset "basic functionality" begin
             u = randn(Float32, 8, 8, 8, 3, 1)
@@ -177,18 +224,6 @@ using Random
 
             # Smooth field should have lower penalty than rough field
             @test penalty_smooth < penalty_rough
-        end
-
-        @testset "single batch (N=1)" begin
-            # Note: Current implementation only supports batch_size=1
-            # following torchreg convention
-            u_single = randn(Float32, 6, 6, 6, 3, 1)
-            reg = LinearElasticity()
-
-            penalty = reg(u_single)
-
-            @test isfinite(penalty)
-            @test penalty >= 0
         end
     end
 end

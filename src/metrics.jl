@@ -332,7 +332,8 @@ Compute jacobi gradient matching torchreg's implementation.
 Input: u with shape (N, Z, Y, X, 3) where N=1
 Output: (3, Z, Y, X, 3) where first 3 = component treated as batch, last 3 = deriv direction
 
-Uses central differences with [-0.5, 0, 0.5] kernel and boundary replication.
+Uses central differences with [-0.5, 0, 0.5] kernel. Boundary handling matches torchreg:
+compute central diff in interior only, then replicate pad the result.
 """
 function _jacobi_gradient_torchreg(u::AbstractArray{T, 5}, id_grid::AbstractArray{T, 5}) where T
     N, Z, Y, X, C = size(u)
@@ -340,66 +341,63 @@ function _jacobi_gradient_torchreg(u::AbstractArray{T, 5}, id_grid::AbstractArra
     @assert C == 3 "Expected 3 components"
 
     # Scale: x = 0.5 * (u + id_grid) * (shape - 1)
-    # shape = (Z, Y, X) in torchreg convention
+    # torchreg uses: scale = u.shape[1:4] - 1 = (Z-1, Y-1, X-1)
+    # This broadcasts with last dim (components), so:
+    # component 0 gets scaled by Z-1
+    # component 1 gets scaled by Y-1
+    # component 2 gets scaled by X-1
     scale_factors = T.([Z - 1, Y - 1, X - 1])
 
     # Scaled coordinates
     scaled = zeros(T, N, Z, Y, X, C)
     @inbounds for c in 1:3
-        scale = scale_factors[c == 1 ? 3 : (c == 2 ? 2 : 1)]  # x->X, y->Y, z->Z
+        scale = scale_factors[c]  # c=1 -> Z-1, c=2 -> Y-1, c=3 -> X-1
         for i in 1:X, j in 1:Y, k in 1:Z
             scaled[1, k, j, i, c] = T(0.5) * (u[1, k, j, i, c] + id_grid[1, k, j, i, c]) * scale
         end
     end
 
     # Output: (3_components, Z, Y, X, 3_deriv_dirs)
-    # After torchreg's permutation scheme, the output has:
-    # - First dim = original component (treated as batch during conv)
-    # - Last dim = derivative direction (conv output channels)
     gradients = zeros(T, 3, Z, Y, X, 3)
 
-    # Central difference: derivative in each direction
-    # torchreg kernel setup:
-    # w[2,0,:,1,1] = window -> D derivative (Z direction) -> output channel 2
-    # w[1,0,1,:,1] = window -> H derivative (Y direction) -> output channel 1
-    # w[0,0,1,1,:] = window -> W derivative (X direction) -> output channel 0
-    #
-    # So output channels: 0=X-deriv, 1=Y-deriv, 2=Z-deriv
+    # torchreg does conv3d THEN replicate pad
+    # conv3d with no padding produces output of size (Z-2, Y-2, X-2)
+    # Then F.pad(..., mode='replicate') restores to (Z, Y, X)
 
-    @inbounds for c in 1:3  # Component (becomes batch in torchreg)
-        for i in 1:X, j in 1:Y, k in 1:Z
-            # X derivative (output channel 0, stored at deriv index 1 in Julia)
-            if i == 1
-                dx = scaled[1, k, j, 2, c] - scaled[1, k, j, 1, c]
-            elseif i == X
-                dx = scaled[1, k, j, X, c] - scaled[1, k, j, X-1, c]
-            else
-                dx = T(0.5) * (scaled[1, k, j, i+1, c] - scaled[1, k, j, i-1, c])
-            end
+    # First compute interior (central differences)
+    @inbounds for c in 1:3
+        for i in 2:X-1, j in 2:Y-1, k in 2:Z-1
+            # X derivative
+            dx = T(0.5) * (scaled[1, k, j, i+1, c] - scaled[1, k, j, i-1, c])
+            # Y derivative
+            dy = T(0.5) * (scaled[1, k, j+1, i, c] - scaled[1, k, j-1, i, c])
+            # Z derivative
+            dz = T(0.5) * (scaled[1, k+1, j, i, c] - scaled[1, k-1, j, i, c])
 
-            # Y derivative (output channel 1, stored at deriv index 2)
-            if j == 1
-                dy = scaled[1, k, 2, i, c] - scaled[1, k, 1, i, c]
-            elseif j == Y
-                dy = scaled[1, k, Y, i, c] - scaled[1, k, Y-1, i, c]
-            else
-                dy = T(0.5) * (scaled[1, k, j+1, i, c] - scaled[1, k, j-1, i, c])
-            end
-
-            # Z derivative (output channel 2, stored at deriv index 3)
-            if k == 1
-                dz = scaled[1, 2, j, i, c] - scaled[1, 1, j, i, c]
-            elseif k == Z
-                dz = scaled[1, Z, j, i, c] - scaled[1, Z-1, j, i, c]
-            else
-                dz = T(0.5) * (scaled[1, k+1, j, i, c] - scaled[1, k-1, j, i, c])
-            end
-
-            # Store in output (component, Z, Y, X, deriv_dir)
-            # deriv_dir: 1=X, 2=Y, 3=Z (matching torchreg channel order 0,1,2)
             gradients[c, k, j, i, 1] = dx
             gradients[c, k, j, i, 2] = dy
             gradients[c, k, j, i, 3] = dz
+        end
+    end
+
+    # Replicate padding: copy values from interior to boundary
+    @inbounds for c in 1:3, d in 1:3
+        # X boundaries (i=1 and i=X)
+        for k in 1:Z, j in 1:Y
+            gradients[c, k, j, 1, d] = gradients[c, k, j, 2, d]
+            gradients[c, k, j, X, d] = gradients[c, k, j, X-1, d]
+        end
+
+        # Y boundaries (j=1 and j=Y)
+        for k in 1:Z, i in 1:X
+            gradients[c, k, 1, i, d] = gradients[c, k, 2, i, d]
+            gradients[c, k, Y, i, d] = gradients[c, k, Y-1, i, d]
+        end
+
+        # Z boundaries (k=1 and k=Z)
+        for j in 1:Y, i in 1:X
+            gradients[c, 1, j, i, d] = gradients[c, 2, j, i, d]
+            gradients[c, Z, j, i, d] = gradients[c, Z-1, j, i, d]
         end
     end
 
