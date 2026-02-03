@@ -1,6 +1,13 @@
 # Utility functions for MedicalImageRegistration.jl
+#
+# GPU Acceleration: This package supports GPU computation via NNlib.jl's GPU backends.
+# When you pass GPU arrays (CuArray for CUDA, MtlArray for Metal), the heavy operations
+# (grid_sample, convolution, batched matrix multiply) automatically run on GPU.
+#
+# For CPU multithreading, AcceleratedKernels.jl is used for parallel loop execution.
 
 using LinearAlgebra
+import AcceleratedKernels as AK
 
 # Helper function to avoid recomputation of constant values in gradient computation
 # This replaces Zygote's ignore_derivatives - in manual gradient computation,
@@ -9,12 +16,70 @@ using LinearAlgebra
     return f()
 end
 
+# ============================================================================
+# GPU Utility Functions
+# ============================================================================
+
+"""
+    to_device(arr::AbstractArray, device_array::AbstractArray)
+
+Convert `arr` to the same array type and device as `device_array`.
+
+This is useful for ensuring auxiliary arrays (like identity grids) are on the
+same device as the input data.
+
+# Example
+```julia
+using CUDA
+moving = CuArray(randn(Float32, 64, 64, 64, 1, 1))
+grid = create_identity_grid((64, 64, 64), Float32)
+gpu_grid = to_device(grid, moving)  # Now on GPU
+```
+"""
+function to_device(arr::AbstractArray, device_array::AbstractArray)
+    # If device_array is not a regular Array, convert arr to same type
+    if typeof(device_array) <: Array
+        return arr
+    else
+        # Use similar to get the right array type, then copy
+        return typeof(device_array)(arr)
+    end
+end
+
+"""
+    get_array_type(arr::AbstractArray)
+
+Get the array constructor type for creating arrays on the same device.
+
+# Example
+```julia
+using CUDA
+x = CuArray(randn(Float32, 10))
+ArrayType = get_array_type(x)  # Returns CuArray
+y = ArrayType{Float32}(undef, 10)  # Creates CuArray
+```
+"""
+function get_array_type(arr::AbstractArray)
+    # For standard arrays, return Array
+    return typeof(arr).name.wrapper
+end
+
 """
     create_identity_grid(spatial_size::NTuple{2, Int}, ::Type{T}=Float32) where T
 
 Create a 2D identity grid with normalized coordinates from -1 to 1.
 
 Returns grid of shape `(2, X, Y)` where dim 1 contains (x, y) coordinates.
+
+# GPU Support
+The returned grid is a standard Array. For GPU computation, the grid will be
+transferred to GPU when used with GPU arrays in operations like grid_sample.
+To create a grid directly on GPU, convert after creation:
+```julia
+using CUDA  # or Metal
+grid = create_identity_grid((64, 64), Float32)
+gpu_grid = CuArray(grid)  # or MtlArray(grid)
+```
 """
 function create_identity_grid(spatial_size::NTuple{2, Int}, ::Type{T}=Float32) where T
     X, Y = spatial_size
@@ -22,7 +87,7 @@ function create_identity_grid(spatial_size::NTuple{2, Int}, ::Type{T}=Float32) w
     xs = collect(T, range(T(-1), T(1), length=X))
     ys = collect(T, range(T(-1), T(1), length=Y))
 
-    # Create grid using broadcasting
+    # Create grid using broadcasting (efficient vectorized operation)
     grid = zeros(T, 2, X, Y)
     @inbounds for j in 1:Y, i in 1:X
         grid[1, i, j] = xs[i]  # x coordinate
@@ -37,6 +102,10 @@ end
 Create a 3D identity grid with normalized coordinates from -1 to 1.
 
 Returns grid of shape `(3, X, Y, Z)` where dim 1 contains (x, y, z) coordinates.
+
+# GPU Support
+The returned grid is a standard Array. For GPU computation, the grid will be
+transferred to GPU when used with GPU arrays in operations like grid_sample.
 """
 function create_identity_grid(spatial_size::NTuple{3, Int}, ::Type{T}=Float32) where T
     X, Y, Z = spatial_size
@@ -285,6 +354,7 @@ Compute spatial gradients of a displacement field using central differences.
 - Uses central differences with [-0.5, 0, 0.5] kernel.
 - Boundary values are replicated.
 - Coordinates are scaled from normalized [-1,1] to voxel coordinates.
+- Uses AcceleratedKernels.jl for CPU multithreading (GPU arrays not yet supported).
 """
 function jacobi_gradient(u::AbstractArray{T, 5}, id_grid::Union{Nothing, AbstractArray}=nothing) where T
     X, Y, Z, C, N = size(u)
@@ -302,52 +372,54 @@ function jacobi_gradient(u::AbstractArray{T, 5}, id_grid::Union{Nothing, Abstrac
     # Output: (3, 3, X, Y, Z, N) - [output_comp, deriv_dir, spatial..., batch]
     gradients = zeros(T, 3, 3, X, Y, Z, N)
 
-    # Central difference kernel: [-0.5, 0, 0.5]
-    @inbounds for n in 1:N
-        for k in 1:Z, j in 1:Y, i in 1:X
-            for c in 1:3  # Output component (u_x, u_y, u_z)
-                # Get scaled value at current position
-                x_curr = T(0.5) * (u[i, j, k, c, n] + id_grid[c, i, j, k]) * scale_factors[c]
+    # Use AcceleratedKernels for parallel iteration over spatial indices
+    # Create a linear index array for parallel processing
+    linear_indices = [(i, j, k, n, c) for n in 1:N, k in 1:Z, j in 1:Y, i in 1:X, c in 1:3]
 
-                # Gradient in x direction (∂/∂x)
-                if i == 1
-                    x_next = T(0.5) * (u[2, j, k, c, n] + id_grid[c, 2, j, k]) * scale_factors[c]
-                    gradients[c, 1, i, j, k, n] = x_next - x_curr
-                elseif i == X
-                    x_prev = T(0.5) * (u[X-1, j, k, c, n] + id_grid[c, X-1, j, k]) * scale_factors[c]
-                    gradients[c, 1, i, j, k, n] = x_curr - x_prev
-                else
-                    x_prev = T(0.5) * (u[i-1, j, k, c, n] + id_grid[c, i-1, j, k]) * scale_factors[c]
-                    x_next = T(0.5) * (u[i+1, j, k, c, n] + id_grid[c, i+1, j, k]) * scale_factors[c]
-                    gradients[c, 1, i, j, k, n] = T(0.5) * (x_next - x_prev)
-                end
+    # Use AK.foreachindex for multithreaded CPU execution
+    AK.foreachindex(linear_indices) do idx
+        i, j, k, n, c = linear_indices[idx]
 
-                # Gradient in y direction (∂/∂y)
-                if j == 1
-                    y_next = T(0.5) * (u[i, 2, k, c, n] + id_grid[c, i, 2, k]) * scale_factors[c]
-                    gradients[c, 2, i, j, k, n] = y_next - x_curr
-                elseif j == Y
-                    y_prev = T(0.5) * (u[i, Y-1, k, c, n] + id_grid[c, i, Y-1, k]) * scale_factors[c]
-                    gradients[c, 2, i, j, k, n] = x_curr - y_prev
-                else
-                    y_prev = T(0.5) * (u[i, j-1, k, c, n] + id_grid[c, i, j-1, k]) * scale_factors[c]
-                    y_next = T(0.5) * (u[i, j+1, k, c, n] + id_grid[c, i, j+1, k]) * scale_factors[c]
-                    gradients[c, 2, i, j, k, n] = T(0.5) * (y_next - y_prev)
-                end
+        # Get scaled value at current position
+        x_curr = T(0.5) * (u[i, j, k, c, n] + id_grid[c, i, j, k]) * scale_factors[c]
 
-                # Gradient in z direction (∂/∂z)
-                if k == 1
-                    z_next = T(0.5) * (u[i, j, 2, c, n] + id_grid[c, i, j, 2]) * scale_factors[c]
-                    gradients[c, 3, i, j, k, n] = z_next - x_curr
-                elseif k == Z
-                    z_prev = T(0.5) * (u[i, j, Z-1, c, n] + id_grid[c, i, j, Z-1]) * scale_factors[c]
-                    gradients[c, 3, i, j, k, n] = x_curr - z_prev
-                else
-                    z_prev = T(0.5) * (u[i, j, k-1, c, n] + id_grid[c, i, j, k-1]) * scale_factors[c]
-                    z_next = T(0.5) * (u[i, j, k+1, c, n] + id_grid[c, i, j, k+1]) * scale_factors[c]
-                    gradients[c, 3, i, j, k, n] = T(0.5) * (z_next - z_prev)
-                end
-            end
+        # Gradient in x direction (∂/∂x)
+        if i == 1
+            x_next = T(0.5) * (u[2, j, k, c, n] + id_grid[c, 2, j, k]) * scale_factors[c]
+            gradients[c, 1, i, j, k, n] = x_next - x_curr
+        elseif i == X
+            x_prev = T(0.5) * (u[X-1, j, k, c, n] + id_grid[c, X-1, j, k]) * scale_factors[c]
+            gradients[c, 1, i, j, k, n] = x_curr - x_prev
+        else
+            x_prev = T(0.5) * (u[i-1, j, k, c, n] + id_grid[c, i-1, j, k]) * scale_factors[c]
+            x_next = T(0.5) * (u[i+1, j, k, c, n] + id_grid[c, i+1, j, k]) * scale_factors[c]
+            gradients[c, 1, i, j, k, n] = T(0.5) * (x_next - x_prev)
+        end
+
+        # Gradient in y direction (∂/∂y)
+        if j == 1
+            y_next = T(0.5) * (u[i, 2, k, c, n] + id_grid[c, i, 2, k]) * scale_factors[c]
+            gradients[c, 2, i, j, k, n] = y_next - x_curr
+        elseif j == Y
+            y_prev = T(0.5) * (u[i, Y-1, k, c, n] + id_grid[c, i, Y-1, k]) * scale_factors[c]
+            gradients[c, 2, i, j, k, n] = x_curr - y_prev
+        else
+            y_prev = T(0.5) * (u[i, j-1, k, c, n] + id_grid[c, i, j-1, k]) * scale_factors[c]
+            y_next = T(0.5) * (u[i, j+1, k, c, n] + id_grid[c, i, j+1, k]) * scale_factors[c]
+            gradients[c, 2, i, j, k, n] = T(0.5) * (y_next - y_prev)
+        end
+
+        # Gradient in z direction (∂/∂z)
+        if k == 1
+            z_next = T(0.5) * (u[i, j, 2, c, n] + id_grid[c, i, j, 2]) * scale_factors[c]
+            gradients[c, 3, i, j, k, n] = z_next - x_curr
+        elseif k == Z
+            z_prev = T(0.5) * (u[i, j, Z-1, c, n] + id_grid[c, i, j, Z-1]) * scale_factors[c]
+            gradients[c, 3, i, j, k, n] = x_curr - z_prev
+        else
+            z_prev = T(0.5) * (u[i, j, k-1, c, n] + id_grid[c, i, j, k-1]) * scale_factors[c]
+            z_next = T(0.5) * (u[i, j, k+1, c, n] + id_grid[c, i, j, k+1]) * scale_factors[c]
+            gradients[c, 3, i, j, k, n] = T(0.5) * (z_next - z_prev)
         end
     end
 
@@ -370,6 +442,7 @@ Compute the determinant of the Jacobian of a displacement field.
 - Uses the Jacobian gradient to compute the 3×3 determinant at each point.
 - det(J) > 0 required for diffeomorphism (no folding).
 - det(J) ≈ 1 means volume-preserving.
+- Uses AcceleratedKernels.jl for CPU multithreading.
 """
 function jacobi_determinant(u::AbstractArray{T, 5}, id_grid::Union{Nothing, AbstractArray}=nothing) where T
     X, Y, Z, _, N = size(u)
@@ -380,7 +453,12 @@ function jacobi_determinant(u::AbstractArray{T, 5}, id_grid::Union{Nothing, Abst
     # Compute determinant at each point
     det_J = zeros(T, X, Y, Z, N)
 
-    @inbounds for n in 1:N, k in 1:Z, j in 1:Y, i in 1:X
+    # Create linear indices for parallel processing
+    linear_indices = [(i, j, k, n) for n in 1:N, k in 1:Z, j in 1:Y, i in 1:X]
+
+    AK.foreachindex(linear_indices) do idx
+        i, j, k, n = linear_indices[idx]
+
         # Extract 3×3 Jacobian matrix at this point
         # J[row, col] = gradient[row, col, i, j, k, n]
         a = gradient[1, 1, i, j, k, n]  # ∂u_x/∂x

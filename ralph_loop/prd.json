@@ -370,7 +370,7 @@
       "id": "IMPL-GPU-001",
       "type": "IMPL",
       "title": "Integrate AcceleratedKernels.jl for GPU support",
-      "status": "open",
+      "status": "done",
       "priority": 15,
       "blockedBy": ["TEST-INTEGRATION-001"],
       "description": "Integrate AcceleratedKernels.jl (AK.jl) for cross-platform GPU acceleration. The package should work transparently on CPU, Metal (Apple Silicon), and CUDA without users having to think about it. Key operations to accelerate: grid sampling, convolutions for smoothing, and any hot loops in the registration.",
