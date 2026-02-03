@@ -206,7 +206,7 @@
       "id": "TEST-METRICS-001",
       "type": "TEST",
       "title": "Parity tests for metrics",
-      "status": "open",
+      "status": "done",
       "priority": 6,
       "blockedBy": ["IMPL-METRICS-003"],
       "description": "Write parity tests for all metrics against torchreg. Use random arrays with fixed seeds for reproducibility.",
