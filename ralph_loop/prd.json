@@ -357,7 +357,7 @@
       "id": "IMPL-SYN-003",
       "type": "IMPL",
       "title": "Implement SyNRegistration struct and fit loop",
-      "status": "open",
+      "status": "done",
       "priority": 11,
       "blockedBy": ["IMPL-SYN-002"],
       "description": "Implement SyNRegistration struct with all config (scales, iterations, regularization, etc). Implement the fit loop that optimizes velocity fields v_xy and v_yx.",

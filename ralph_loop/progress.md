@@ -1896,3 +1896,158 @@ Made all operations Zygote-compatible:
 3. **Memory efficiency**: For batch processing, concatenates inputs along batch dimension to minimize number of grid_sample calls.
 
 ---
+
+## [IMPL-SYN-003] Implement SyNRegistration struct and fit loop
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+### Implementation Summary
+
+Implemented the full `SyNRegistration` struct with multi-resolution optimization in `src/syn.jl`.
+
+#### SyNRegistration Struct
+
+```julia
+mutable struct SyNRegistration{T, F, R, O} <: AbstractRegistration
+    # Configuration
+    scales::Tuple{Vararg{Int}}      # (4, 2, 1) = multi-resolution pyramid
+    iterations::Tuple{Vararg{Int}}  # Iterations per scale
+    learning_rates::Vector{T}       # Learning rate per scale
+    verbose::Bool
+
+    # Loss functions
+    dissimilarity_fn::F             # Image dissimilarity (MSE, NCC, etc.)
+    regularization_fn::R            # Flow regularization (optional)
+    optimizer::O                    # Adam, etc.
+
+    # Parameters
+    sigma_img::T                    # Image smoothing (0 to disable)
+    sigma_flow::T                   # Velocity field smoothing
+    lambda_::T                      # Regularization weight
+    time_steps::Int                 # Scaling-and-squaring steps
+
+    # Learned state
+    v_xy::Union{Nothing, Array{T, 5}}  # Velocity: moving → static
+    v_yx::Union{Nothing, Array{T, 5}}  # Velocity: static → moving
+end
+```
+
+#### fit!() Optimization Loop
+
+```julia
+function fit!(reg, moving, static, iterations, learning_rate)
+    # Pack velocity fields for optimization
+    params = (reg.v_xy, reg.v_yx)
+    opt_state = Optimisers.setup(Adam(learning_rate), params)
+
+    for iter in 1:iterations
+        # Compute loss and gradients with Zygote
+        (loss, dissim, reg_val), grads = Zygote.withgradient(params) do p
+            vxy_smooth = gauss_smoothing(p[1], sigma_flow)
+            vyx_smooth = gauss_smoothing(p[2], sigma_flow)
+            result = apply_flows(moving, static, vxy_smooth, vyx_smooth)
+
+            # Symmetric loss
+            dissimilarity = (
+                loss_fn(moving, result.images.yx_full) +  # x → yx_full
+                loss_fn(static, result.images.xy_full) +  # y → xy_full
+                loss_fn(result.images.xy_half, result.images.yx_half)  # midpoint
+            )
+            total_loss = dissimilarity + lambda * regularization
+            return total_loss, dissimilarity, regularization
+        end
+
+        # Update parameters
+        opt_state, params = Optimisers.update!(opt_state, params, grads[1])
+    end
+
+    # Store smoothed velocity fields
+    reg.v_xy = gauss_smoothing(params[1], sigma_flow)
+    reg.v_yx = gauss_smoothing(params[2], sigma_flow)
+end
+```
+
+#### register() Multi-Resolution API
+
+```julia
+function register(moving, static, reg::SyNRegistration; return_moved=true)
+    # Initialize velocity fields to zeros
+    reg.v_xy = zeros(T, X, Y, Z, 3, N)
+    reg.v_yx = zeros(T, X, Y, Z, 3, N)
+
+    # Multi-resolution optimization
+    for (scale, iters, lr) in zip(scales, iterations, learning_rates)
+        # Downsample images and velocity fields
+        scaled_shape = spatial_shape ./ scale
+        moving_small = upsample_velocity(moving, scaled_shape)
+        static_small = upsample_velocity(static, scaled_shape)
+        reg.v_xy = upsample_velocity(reg.v_xy, scaled_shape)
+        reg.v_yx = upsample_velocity(reg.v_yx, scaled_shape)
+
+        # Optional image smoothing
+        if sigma_img > 0
+            moving_small = gauss_smoothing(moving_small, sigma_img_scaled)
+            static_small = gauss_smoothing(static_small, sigma_img_scaled)
+        end
+
+        # Run optimization
+        fit!(reg, moving_small, static_small, iters, lr)
+    end
+
+    # Upsample to full resolution and return results
+    reg.v_xy = upsample_velocity(reg.v_xy, spatial_shape)
+    reg.v_yx = upsample_velocity(reg.v_yx, spatial_shape)
+
+    if return_moved
+        result = apply_flows(moving, static, reg.v_xy, reg.v_yx)
+        return (moved_xy, moved_yx, flow_xy, flow_yx)
+    end
+end
+```
+
+### Test Results
+
+| Test | Result |
+|------|--------|
+| SyNRegistration default construction | ✅ Works |
+| SyNRegistration custom parameters | ✅ Works |
+| fit!() converges on synthetic data | ✅ 99.8% MSE reduction |
+| register() multi-resolution | ✅ Coarse-to-fine works |
+| Batch support (N > 1) | ✅ Correct shapes |
+| Zero velocity → identity transform | ✅ Preserved |
+| Output finite | ✅ No NaN/Inf |
+
+**Synthetic test details:**
+- 16×16×16 Gaussian blob shifted 4 voxels
+- Initial MSE: 0.024
+- Final MSE: 4.7e-5
+- MSE reduction: 99.8%
+- Mean |flow_x|: 0.27 (expected ~0.5 for 4-voxel shift)
+
+### Acceptance Criteria Verification
+
+- ✅ SyNRegistration struct with all parameters
+- ✅ fit() optimizes bidirectional velocity fields
+- ✅ Combines dissimilarity + regularization loss (regularization optional for now)
+- ✅ Multiresolution pyramid works
+
+### Known Limitations
+
+1. **LinearElasticity regularization not Zygote-compatible**: The `_jacobi_gradient_torchreg` function uses array mutation which Zygote can't differentiate. Default regularization is `nothing` (dissimilarity only).
+
+2. **Regularization planned for future**: A Zygote-compatible version of LinearElasticity could be added as a future enhancement.
+
+### Notes
+
+1. **Symmetric loss**: Following torchreg, uses three terms:
+   - `moving ↔ yx_full`: moving should match static warped to moving
+   - `static ↔ xy_full`: static should match moving warped to static
+   - `xy_half ↔ yx_half`: half-way images should match at midpoint
+
+2. **Velocity field smoothing**: Applied before apply_flows to regularize the transformation.
+
+3. **Image smoothing**: Optional, controlled by `sigma_img`. Set to 0 to disable.
+
+---

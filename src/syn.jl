@@ -484,7 +484,6 @@ end
 # SyNRegistration Type
 # ============================================================================
 
-# Placeholder - will be fully implemented in IMPL-SYN-003
 """
     SyNRegistration{T, F, R, O} <: AbstractRegistration
 
@@ -495,15 +494,56 @@ SyN is a powerful non-rigid registration algorithm that:
 2. Uses bidirectional (symmetric) optimization
 3. Employs velocity field parameterization with scaling-and-squaring
 
-# Fields (to be implemented in IMPL-SYN-003)
-- Configuration: scales, iterations, learning rates
-- Velocity fields: v_xy (moving→static), v_yx (static→moving)
-- Regularization parameters: sigma_img, sigma_flow, lambda_
+# Type Parameters
+- `T`: Element type for parameters (typically Float32)
+- `F`: Dissimilarity function type
+- `R`: Regularization function type
+- `O`: Optimizer type from Optimisers.jl
+
+# Fields
+
+## Configuration
+- `scales::Tuple{Vararg{Int}}`: Multi-resolution pyramid scales (e.g., (4, 2, 1))
+- `iterations::Tuple{Vararg{Int}}`: Number of iterations per scale level
+- `learning_rates::Vector{T}`: Learning rates per scale level
+- `verbose::Bool`: Whether to display progress during registration
+
+## Loss Functions
+- `dissimilarity_fn::F`: Image dissimilarity function (e.g., MSE, NCC)
+- `regularization_fn::R`: Regularization function for flow fields
+- `optimizer::O`: Optimizer type from Optimisers.jl
+
+## Regularization Parameters
+- `sigma_img::T`: Gaussian smoothing sigma for images (0 to disable)
+- `sigma_flow::T`: Gaussian smoothing sigma for velocity fields
+- `lambda_::T`: Regularization weight
+
+## Diffeomorphic Settings
+- `time_steps::Int`: Number of scaling-and-squaring steps (default 7)
+
+## Learned State (populated after registration)
+- `v_xy::Union{Nothing, Array{T, 5}}`: Velocity field moving→static
+- `v_yx::Union{Nothing, Array{T, 5}}`: Velocity field static→moving
+
+# Example
+```julia
+# Create SyN registration
+reg = SyNRegistration(
+    scales=(4, 2, 1),
+    iterations=(30, 30, 10),
+    learning_rate=1e-2f0,
+    lambda_=2e-5f0
+)
+
+# Register moving to static
+moved_xy, moved_yx, flow_xy, flow_yx = register(moving, static, reg)
+```
 
 # See Also
+- [`register`](@ref): Run registration
 - `diffeomorphic_transform`: Core scaling-and-squaring algorithm
 - `spatial_transform`: Warp images using displacement fields
-- `composition_transform`: Compose displacement fields
+- `apply_flows`: Compute bidirectional warped images
 """
 mutable struct SyNRegistration{T, F, R, O} <: AbstractRegistration
     # Configuration
@@ -530,26 +570,82 @@ mutable struct SyNRegistration{T, F, R, O} <: AbstractRegistration
     v_yx::Union{Nothing, Array{T, 5}}  # Velocity field: static → moving
 end
 
-# Default constructor - will be implemented fully in IMPL-SYN-003
-# For now, just a minimal version for testing
+"""
+    SyNRegistration(;
+        scales=(4, 2, 1),
+        iterations=(30, 30, 10),
+        learning_rate=1e-2,
+        verbose=true,
+        dissimilarity_fn=mse_loss,
+        regularization_fn=LinearElasticity(),
+        optimizer=Adam,
+        sigma_img=0.2f0,
+        sigma_flow=0.2f0,
+        lambda_=2e-5f0,
+        time_steps=7
+    )
+
+Create a SyN registration object with the specified configuration.
+
+# Arguments
+
+## Multi-resolution Pyramid
+- `scales::Tuple=(4, 2, 1)`: Downsampling factors for pyramid levels.
+  Images are downsampled by 1/scale at each level.
+- `iterations::Tuple=(30, 30, 10)`: Optimization iterations per pyramid level.
+  Must have same length as `scales`.
+
+## Optimization
+- `learning_rate=1e-2`: Learning rate for optimizer. Can be a scalar
+  (same for all scales) or a tuple/vector matching scales.
+- `verbose::Bool=true`: Display progress during registration
+- `dissimilarity_fn=mse_loss`: Loss function for image similarity
+- `regularization_fn=nothing`: Regularization for flow smoothness (LinearElasticity not yet Zygote-compatible)
+- `optimizer=Adam`: Optimizer type from Optimisers.jl
+
+## Regularization
+- `sigma_img=0.2f0`: Gaussian smoothing sigma for images. Set to 0 to disable.
+- `sigma_flow=0.2f0`: Gaussian smoothing sigma for velocity fields.
+- `lambda_=2e-5f0`: Weight for regularization term in loss.
+
+## Diffeomorphic Settings
+- `time_steps::Int=7`: Number of scaling-and-squaring steps.
+  Higher values give more accurate diffeomorphism.
+
+# Returns
+- `SyNRegistration`: Registration object ready for use with `register()`
+
+# Notes
+- Default regularization is `nothing` (LinearElasticity not yet Zygote-compatible)
+- If regularization_fn is `nothing`, only dissimilarity is used
+- Learning rate can be a scalar or per-scale tuple
+"""
 function SyNRegistration(;
     scales::Tuple{Vararg{Int}} = (4, 2, 1),
     iterations::Tuple{Vararg{Int}} = (30, 30, 10),
     learning_rate = 1e-2,
     verbose::Bool = true,
     dissimilarity_fn = mse_loss,
-    regularization_fn = nothing,  # Will default to LinearElasticity
+    regularization_fn = nothing,  # LinearElasticity not yet Zygote-compatible
     optimizer = Adam,
-    sigma_img = 0.2f0,
-    sigma_flow = 0.2f0,
-    lambda_ = 2e-5f0,
+    sigma_img = Float32(0.2),
+    sigma_flow = Float32(0.2),
+    lambda_ = Float32(2e-5),
     time_steps::Int = 7
 )
+    @assert length(scales) == length(iterations) "scales and iterations must have same length"
+    @assert all(s > 0 for s in scales) "all scales must be positive"
+    @assert all(i > 0 for i in iterations) "all iterations must be positive"
+
     T = Float32
 
     # Create learning rate vector
-    lr = T(learning_rate)
-    learning_rates = fill(lr, length(scales))
+    if learning_rate isa Number
+        learning_rates = fill(T(learning_rate), length(scales))
+    else
+        @assert length(learning_rate) == length(scales) "learning_rate must match scales length"
+        learning_rates = T.(collect(learning_rate))
+    end
 
     return SyNRegistration{T, typeof(dissimilarity_fn), typeof(regularization_fn), typeof(optimizer)}(
         scales,
@@ -566,4 +662,260 @@ function SyNRegistration(;
         nothing,  # v_xy
         nothing   # v_yx
     )
+end
+
+# ============================================================================
+# SyN Fit and Register Functions
+# ============================================================================
+
+"""
+    upsample_velocity(v::AbstractArray{T, 5}, target_size::NTuple{3, Int}) where T
+
+Upsample velocity field to target spatial size using trilinear interpolation.
+"""
+function upsample_velocity(v::AbstractArray{T, 5}, target_size::NTuple{3, Int}) where T
+    current_size = size(v)[1:3]
+    if current_size == target_size
+        return copy(v)
+    end
+
+    X, Y, Z, C, N = size(v)
+    X_t, Y_t, Z_t = target_size
+
+    # Create identity affine for interpolation
+    affine = identity_affine(3, N, T)
+
+    # Treat velocity field channels as "image channels" for interpolation
+    # v: (X, Y, Z, 3, N) - treat 3 velocity components as channels
+    return affine_transform(v, affine; shape=target_size, padding_mode=:border)
+end
+
+"""
+    fit!(reg::SyNRegistration, moving, static, iterations::Int, learning_rate; verbose=nothing)
+
+Run SyN optimization for a single resolution level.
+
+# Arguments
+- `reg`: SyNRegistration with velocity fields already initialized at correct size
+- `moving`: Moving image at current resolution, shape `(X, Y, Z, C, N)`
+- `static`: Static target image, same shape as moving
+- `iterations`: Number of optimization iterations
+- `learning_rate`: Learning rate for this scale
+
+# Notes
+- Modifies `reg.v_xy` and `reg.v_yx` in place
+- Uses Zygote for gradient computation
+- Uses Optimisers.jl for parameter updates
+"""
+function fit!(
+    reg::SyNRegistration{T},
+    moving::AbstractArray{T, 5},
+    static::AbstractArray{T, 5},
+    iterations::Int,
+    learning_rate::T;
+    verbose::Union{Nothing, Bool} = nothing
+) where T
+    verbose = verbose === nothing ? reg.verbose : verbose
+
+    X, Y, Z = size(moving)[1:3]
+    N = size(moving, 5)
+
+    # Get current velocity fields at this resolution
+    v_xy = reg.v_xy
+    v_yx = reg.v_yx
+
+    # Smoothing sigma for velocity fields
+    sigma_flow = fill(reg.sigma_flow, 3)
+
+    # Pack parameters for optimization
+    params = (v_xy, v_yx)
+
+    # Setup optimizer
+    opt_rule = reg.optimizer(learning_rate)
+    opt_state = Optimisers.setup(opt_rule, params)
+
+    # Optimization loop
+    local loss_val, dissim_val, reg_val
+    for iter in 1:iterations
+        # Compute loss and gradients
+        (loss_val, dissim_val, reg_val), grads = Zygote.withgradient(params) do p
+            vxy, vyx = p
+
+            # Smooth velocity fields
+            vxy_smooth = gauss_smoothing(vxy, sigma_flow)
+            vyx_smooth = gauss_smoothing(vyx, sigma_flow)
+
+            # Apply flows
+            result = apply_flows(moving, static, vxy_smooth, vyx_smooth;
+                                 time_steps=reg.time_steps)
+
+            # Symmetric dissimilarity loss:
+            # - moving should match yx_full (static warped to moving space)
+            # - static should match xy_full (moving warped to static space)
+            # - half images should match at midpoint
+            dissimilarity = (
+                reg.dissimilarity_fn(moving, result.images.yx_full) +
+                reg.dissimilarity_fn(static, result.images.xy_full) +
+                reg.dissimilarity_fn(result.images.xy_half, result.images.yx_half)
+            )
+
+            # Regularization on flow fields
+            regularization = T(0)
+            if reg.regularization_fn !== nothing
+                regularization = (
+                    reg.regularization_fn(result.flows.xy_full) +
+                    reg.regularization_fn(result.flows.yx_full)
+                )
+            end
+
+            total_loss = dissimilarity + reg.lambda_ * regularization
+
+            return total_loss, dissimilarity, regularization
+        end
+
+        # Get gradients
+        grad_vxy, grad_vyx = grads[1]
+
+        # Update parameters
+        opt_state, params = Optimisers.update!(opt_state, params, (grad_vxy, grad_vyx))
+
+        # Display progress
+        if verbose && (iter == 1 || iter % 10 == 0 || iter == iterations)
+            println("  Iteration $iter/$iterations: loss=$(round(loss_val; digits=6)), " *
+                    "dissim=$(round(dissim_val; digits=6)), reg=$(round(reg_val; digits=6))")
+        end
+    end
+
+    # Update stored velocity fields with final smoothed versions
+    v_xy, v_yx = params
+    reg.v_xy = gauss_smoothing(v_xy, sigma_flow)
+    reg.v_yx = gauss_smoothing(v_yx, sigma_flow)
+
+    return loss_val, dissim_val, reg_val
+end
+
+"""
+    register(moving, static, reg::SyNRegistration; v_xy=nothing, v_yx=nothing, return_moved=true)
+
+Perform SyN diffeomorphic registration of moving image to static image.
+
+# Arguments
+- `moving`: Moving image to register, shape `(X, Y, Z, C, N)`
+- `static`: Static target image, same shape convention
+- `reg`: SyNRegistration configuration object
+- `v_xy`: Optional initial velocity field moving→static
+- `v_yx`: Optional initial velocity field static→moving
+- `return_moved`: If true, compute and return warped images
+
+# Returns
+If `return_moved=true`, returns tuple:
+- `moved_xy`: Moving image warped to static space (full transform)
+- `moved_yx`: Static image warped to moving space (full transform)
+- `flow_xy`: Displacement field moving→static, shape `(X, Y, Z, 3, N)`
+- `flow_yx`: Displacement field static→moving, shape `(X, Y, Z, 3, N)`
+
+If `return_moved=false`, returns `nothing`. Use `apply_flows` manually to get results.
+
+# Notes
+- Initializes velocity fields to zeros if not provided
+- Runs multi-resolution optimization pyramid
+- After completion, `reg.v_xy` and `reg.v_yx` contain learned velocity fields
+
+# Example
+```julia
+reg = SyNRegistration(scales=(4, 2, 1), iterations=(30, 30, 10))
+moved_xy, moved_yx, flow_xy, flow_yx = register(moving, static, reg)
+```
+"""
+function register(
+    moving::AbstractArray{T, 5},
+    static::AbstractArray{T, 5},
+    reg::SyNRegistration{T};
+    v_xy::Union{Nothing, AbstractArray{T, 5}} = nothing,
+    v_yx::Union{Nothing, AbstractArray{T, 5}} = nothing,
+    return_moved::Bool = true
+) where T
+    # Validate input shapes
+    @assert size(moving) == size(static) "moving and static must have same shape"
+    @assert ndims(moving) == 5 "Expected 5D arrays (X, Y, Z, C, N)"
+
+    X, Y, Z, C, N = size(moving)
+    spatial_shape = (X, Y, Z)
+
+    # Initialize velocity fields to zeros if not provided
+    if v_xy === nothing
+        v_xy = zeros(T, X, Y, Z, 3, N)
+    end
+    if v_yx === nothing
+        v_yx = zeros(T, X, Y, Z, 3, N)
+    end
+
+    # Store initial velocity fields
+    reg.v_xy = copy(v_xy)
+    reg.v_yx = copy(v_yx)
+
+    if reg.verbose
+        println("Starting SyN registration...")
+        println("  Image shape: $spatial_shape × $C channels × $N batch")
+        println("  Scales: $(reg.scales)")
+        println("  Iterations: $(reg.iterations)")
+    end
+
+    # Multi-resolution optimization
+    for (i, (scale, iters)) in enumerate(zip(reg.scales, reg.iterations))
+        lr = reg.learning_rates[i]
+
+        if reg.verbose
+            println("\nScale 1/$scale (lr=$lr):")
+        end
+
+        # Compute shape at this scale
+        scaled_shape = ntuple(d -> max(1, round(Int, spatial_shape[d] / scale)), 3)
+
+        # Downsample images if needed
+        if scaled_shape != spatial_shape
+            moving_small = upsample_velocity(moving, scaled_shape)  # Works for images too
+            static_small = upsample_velocity(static, scaled_shape)
+        else
+            moving_small = moving
+            static_small = static
+        end
+
+        # Upsample velocity fields to current resolution
+        reg.v_xy = upsample_velocity(reg.v_xy, scaled_shape)
+        reg.v_yx = upsample_velocity(reg.v_yx, scaled_shape)
+
+        # Optional image smoothing
+        if reg.sigma_img > 0
+            # Scale sigma based on image size (following torchreg)
+            sigma_img_scaled = reg.sigma_img .* 200.0f0 ./ T.(collect(scaled_shape))
+            moving_small = gauss_smoothing(moving_small, sigma_img_scaled)
+            static_small = gauss_smoothing(static_small, sigma_img_scaled)
+        end
+
+        # Run optimization at this scale
+        fit!(reg, moving_small, static_small, iters, lr)
+    end
+
+    # Upsample velocity fields to full resolution
+    reg.v_xy = upsample_velocity(reg.v_xy, spatial_shape)
+    reg.v_yx = upsample_velocity(reg.v_yx, spatial_shape)
+
+    if reg.verbose
+        println("\nRegistration complete.")
+    end
+
+    # Return warped images if requested
+    if return_moved
+        result = apply_flows(moving, static, reg.v_xy, reg.v_yx;
+                            time_steps=reg.time_steps)
+        return (
+            result.images.xy_full,   # moving warped to static
+            result.images.yx_full,   # static warped to moving
+            result.flows.xy_full,    # flow moving→static
+            result.flows.yx_full     # flow static→moving
+        )
+    else
+        return nothing
+    end
 end
