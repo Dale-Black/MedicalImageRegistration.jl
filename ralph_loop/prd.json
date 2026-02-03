@@ -1,0 +1,456 @@
+{
+  "project": "MedicalImageRegistration.jl",
+  "description": "Port torchreg (PyTorch image registration) to idiomatic Julia with full parity testing",
+  "source": "https://github.com/codingfisch/torchreg",
+  "loopInstructions": {
+    "storyTypes": {
+      "RESEARCH": "Deep-dive study with documentation. Read source files, understand algorithms, document findings in progress.md",
+      "SETUP": "Create infrastructure (files, configs, test harnesses). Verify with basic smoke tests",
+      "IMPL": "Implement feature following Julia idioms. Must pass type checks and basic tests",
+      "TEST": "Write parity tests comparing Julia vs torchreg via PythonCall. All tests must pass"
+    },
+    "workflowRules": [
+      "Pick lowest-priority OPEN story where all blockedBy are DONE",
+      "Read the story description and acceptance criteria carefully",
+      "For IMPL stories: implement in idiomatic Julia, NOT line-by-line translation",
+      "For TEST stories: use PythonCall to compare with torchreg on identical inputs",
+      "Mark story DONE only when ALL acceptance criteria are met",
+      "Commit after each completed story with message: [STORY-ID] description",
+      "If blocked, document in progress.md and output RALPH_BLOCKED"
+    ],
+    "juliaConventions": {
+      "arrayAxes": {
+        "2D": "(X, Y, C, N) where X=width, Y=height, C=channels, N=batch",
+        "3D": "(X, Y, Z, C, N) where X=width, Y=height, Z=depth",
+        "note": "Julia is column-major. PyTorch is (N, C, ..spatial..). Permute axes in tests."
+      },
+      "naming": {
+        "functions": "snake_case (register, get_affine, affine_transform)",
+        "types": "PascalCase (AffineRegistration, SyNRegistration)",
+        "constants": "SCREAMING_SNAKE_CASE"
+      },
+      "style": "Use multiple dispatch, keyword arguments, type annotations where helpful"
+    }
+  },
+  "stories": [
+    {
+      "id": "RESEARCH-001",
+      "type": "RESEARCH",
+      "title": "Deep dive into torchreg architecture and algorithms",
+      "status": "done",
+      "priority": 1,
+      "blockedBy": [],
+      "description": "Study the torchreg source code in /Users/daleblack/Documents/dev/torchreg_temp/torchreg/. Document: (1) How affine_transform works with F.affine_grid + F.grid_sample, (2) How compose_affine builds the affine matrix from translation/rotation/zoom/shear, (3) How SyN diffeomorphic transform uses scaling-and-squaring, (4) All loss functions and their formulas.",
+      "acceptanceCriteria": [
+        "progress.md contains detailed notes on affine_transform implementation",
+        "progress.md contains compose_affine matrix construction formula",
+        "progress.md contains SyN diffeomorphic algorithm explanation",
+        "progress.md contains all metric formulas (MSE, Dice, NCC, LinearElasticity)"
+      ],
+      "files": [
+        "/Users/daleblack/Documents/dev/torchreg_temp/torchreg/affine.py",
+        "/Users/daleblack/Documents/dev/torchreg_temp/torchreg/syn.py",
+        "/Users/daleblack/Documents/dev/torchreg_temp/torchreg/metrics.py",
+        "/Users/daleblack/Documents/dev/torchreg_temp/torchreg/utils.py"
+      ]
+    },
+    {
+      "id": "RESEARCH-002",
+      "type": "RESEARCH",
+      "title": "Research Julia equivalents for PyTorch operations",
+      "status": "done",
+      "priority": 1,
+      "blockedBy": ["RESEARCH-001"],
+      "description": "Document how to implement torchreg operations in Julia: (1) NNlib.grid_sample vs F.grid_sample API differences, (2) How to create affine_grid in Julia (meshgrid + matmul), (3) Enzyme.jl gradient API for custom operations, (4) Optimisers.jl API vs torch.optim.",
+      "acceptanceCriteria": [
+        "progress.md documents NNlib.grid_sample signature and padding modes",
+        "progress.md shows affine_grid implementation approach",
+        "progress.md documents Enzyme autodiff pattern for our use case",
+        "progress.md documents Optimisers.jl setup and update pattern"
+      ],
+      "files": []
+    },
+    {
+      "id": "SETUP-001",
+      "type": "SETUP",
+      "title": "Set up test harness with PythonCall.jl",
+      "status": "open",
+      "priority": 2,
+      "blockedBy": ["RESEARCH-002"],
+      "description": "Implement test/test_utils.jl with: (1) julia_to_torch function that converts Julia arrays to PyTorch tensors with correct axis permutation, (2) torch_to_julia for the reverse, (3) compare_results helper for tolerance-based comparison, (4) Verify harness works by round-tripping a test array.",
+      "acceptanceCriteria": [
+        "julia_to_torch correctly permutes (X,Y,Z,C,N) -> (N,C,Z,Y,X)",
+        "torch_to_julia correctly permutes (N,C,Z,Y,X) -> (X,Y,Z,C,N)",
+        "compare_results handles both 2D and 3D arrays",
+        "Round-trip test passes: arr == torch_to_julia(julia_to_torch(arr))"
+      ],
+      "files": ["test/test_utils.jl"]
+    },
+    {
+      "id": "IMPL-UTILS-001",
+      "type": "IMPL",
+      "title": "Implement affine_grid function",
+      "status": "open",
+      "priority": 3,
+      "blockedBy": ["SETUP-001"],
+      "description": "Implement affine_grid(theta, size) in src/utils.jl that creates a sampling grid for spatial transformations. This is equivalent to F.affine_grid in PyTorch. Should work for both 2D and 3D.",
+      "acceptanceCriteria": [
+        "affine_grid works for 2D: size=(X, Y, C, N)",
+        "affine_grid works for 3D: size=(X, Y, Z, C, N)",
+        "Identity affine produces normalized grid from -1 to 1",
+        "Function is type-stable"
+      ],
+      "files": ["src/utils.jl"],
+      "torchregRef": "utils.py:create_grid (line 40-41)"
+    },
+    {
+      "id": "IMPL-UTILS-002",
+      "type": "IMPL",
+      "title": "Implement Gaussian smoothing kernel",
+      "status": "open",
+      "priority": 3,
+      "blockedBy": ["IMPL-UTILS-001"],
+      "description": "Implement smooth_kernel(kernel_size, sigma) in src/utils.jl that creates a Gaussian smoothing kernel. Used by SyN for flow regularization.",
+      "acceptanceCriteria": [
+        "smooth_kernel produces normalized Gaussian kernel",
+        "Works for both 2D and 3D kernel sizes",
+        "Kernel sums to 1.0"
+      ],
+      "files": ["src/utils.jl"],
+      "torchregRef": "utils.py:smooth_kernel (line 6-12)"
+    },
+    {
+      "id": "IMPL-UTILS-003",
+      "type": "IMPL",
+      "title": "Implement Jacobian gradient and determinant",
+      "status": "open",
+      "priority": 3,
+      "blockedBy": ["IMPL-UTILS-002"],
+      "description": "Implement jacobi_gradient(u, id_grid) and jacobi_determinant(u, id_grid) in src/utils.jl for computing spatial gradients of displacement fields. Used by LinearElasticity regularizer.",
+      "acceptanceCriteria": [
+        "jacobi_gradient computes spatial derivatives correctly",
+        "jacobi_determinant computes 3x3 determinant of Jacobian",
+        "Both handle boundary padding appropriately"
+      ],
+      "files": ["src/utils.jl"],
+      "torchregRef": "utils.py:jacobi_gradient (line 25-37), jacobi_determinant (line 15-22)"
+    },
+    {
+      "id": "TEST-UTILS-001",
+      "type": "TEST",
+      "title": "Parity tests for utility functions",
+      "status": "open",
+      "priority": 4,
+      "blockedBy": ["IMPL-UTILS-003"],
+      "description": "Write parity tests comparing Julia utils to torchreg utils. Test affine_grid, smooth_kernel, jacobi_gradient, jacobi_determinant against PyTorch equivalents.",
+      "acceptanceCriteria": [
+        "affine_grid matches torchreg create_grid within rtol=1e-5",
+        "smooth_kernel matches torchreg smooth_kernel within rtol=1e-5",
+        "jacobi_gradient matches within rtol=1e-4",
+        "All tests pass with both 2D and 3D inputs"
+      ],
+      "files": ["test/test_utils.jl"]
+    },
+    {
+      "id": "IMPL-METRICS-001",
+      "type": "IMPL",
+      "title": "Implement Dice loss and score",
+      "status": "open",
+      "priority": 5,
+      "blockedBy": ["TEST-UTILS-001"],
+      "description": "Implement dice_score(x1, x2) and dice_loss(x1, x2) in src/metrics.jl. Dice coefficient measures overlap between two binary/soft masks.",
+      "acceptanceCriteria": [
+        "dice_score returns value in [0, 1]",
+        "dice_loss = 1 - dice_score",
+        "Works for both 2D and 3D arrays",
+        "Handles batch dimension correctly"
+      ],
+      "files": ["src/metrics.jl"],
+      "torchregRef": "metrics.py:dice_loss, dice_score (line 7-15)"
+    },
+    {
+      "id": "IMPL-METRICS-002",
+      "type": "IMPL",
+      "title": "Implement Normalized Cross-Correlation (NCC) loss",
+      "status": "open",
+      "priority": 5,
+      "blockedBy": ["IMPL-METRICS-001"],
+      "description": "Implement NCC loss as a callable struct in src/metrics.jl. Uses local window correlation.",
+      "acceptanceCriteria": [
+        "NCC struct with kernel_size parameter",
+        "Forward pass computes windowed cross-correlation",
+        "Returns negative CC (for minimization)",
+        "Works for 2D and 3D"
+      ],
+      "files": ["src/metrics.jl"],
+      "torchregRef": "metrics.py:NCC (line 46-64)"
+    },
+    {
+      "id": "IMPL-METRICS-003",
+      "type": "IMPL",
+      "title": "Implement LinearElasticity regularizer",
+      "status": "open",
+      "priority": 5,
+      "blockedBy": ["IMPL-METRICS-002"],
+      "description": "Implement LinearElasticity regularizer in src/metrics.jl. Penalizes non-smooth deformation fields using strain tensor.",
+      "acceptanceCriteria": [
+        "LinearElasticity struct with mu, lam parameters",
+        "Computes strain tensor from Jacobian",
+        "Returns regularization penalty",
+        "Works for 3D displacement fields"
+      ],
+      "files": ["src/metrics.jl"],
+      "torchregRef": "metrics.py:LinearElasticity (line 18-43)"
+    },
+    {
+      "id": "TEST-METRICS-001",
+      "type": "TEST",
+      "title": "Parity tests for metrics",
+      "status": "open",
+      "priority": 6,
+      "blockedBy": ["IMPL-METRICS-003"],
+      "description": "Write parity tests for all metrics against torchreg. Use random arrays with fixed seeds for reproducibility.",
+      "acceptanceCriteria": [
+        "dice_loss matches torchreg within rtol=1e-5",
+        "NCC loss matches within rtol=1e-4",
+        "LinearElasticity matches within rtol=1e-4",
+        "Tests cover both 2D and 3D cases"
+      ],
+      "files": ["test/test_metrics.jl"]
+    },
+    {
+      "id": "IMPL-AFFINE-001",
+      "type": "IMPL",
+      "title": "Implement AffineRegistration struct and types",
+      "status": "open",
+      "priority": 7,
+      "blockedBy": ["TEST-METRICS-001"],
+      "description": "Implement AffineRegistration mutable struct in src/types.jl and src/affine.jl. Store all configuration: scales, iterations, learning_rate, loss function, optimizer, parameter flags, interpolation settings.",
+      "acceptanceCriteria": [
+        "AffineRegistration struct with all config fields",
+        "Constructor with sensible defaults matching torchreg",
+        "Supports both 2D (ndims=2) and 3D (ndims=3)",
+        "Stores learned parameters after registration"
+      ],
+      "files": ["src/types.jl", "src/affine.jl"],
+      "torchregRef": "affine.py:AffineRegistration.__init__ (line 7-25)"
+    },
+    {
+      "id": "IMPL-AFFINE-002",
+      "type": "IMPL",
+      "title": "Implement init_parameters and compose_affine",
+      "status": "open",
+      "priority": 7,
+      "blockedBy": ["IMPL-AFFINE-001"],
+      "description": "Implement init_parameters() to create translation, rotation, zoom, shear parameters. Implement compose_affine() to build affine matrix from these components.",
+      "acceptanceCriteria": [
+        "init_parameters creates correct shapes for 2D and 3D",
+        "compose_affine builds [n_dim, n_dim+1] affine matrix",
+        "Identity parameters produce identity affine",
+        "Handles batch dimension"
+      ],
+      "files": ["src/affine.jl"],
+      "torchregRef": "affine.py:init_parameters (line 68-78), compose_affine (line 81-90)"
+    },
+    {
+      "id": "IMPL-AFFINE-003",
+      "type": "IMPL",
+      "title": "Implement affine_transform using grid_sample",
+      "status": "open",
+      "priority": 7,
+      "blockedBy": ["IMPL-AFFINE-002"],
+      "description": "Implement affine_transform(x, affine, shape) that applies affine transformation using affine_grid + NNlib.grid_sample.",
+      "acceptanceCriteria": [
+        "affine_transform works for 2D and 3D",
+        "Supports bilinear/trilinear interpolation",
+        "Handles padding modes (border, zeros, reflection)",
+        "Output shape can differ from input shape"
+      ],
+      "files": ["src/affine.jl"],
+      "torchregRef": "affine.py:affine_transform (line 61-65)"
+    },
+    {
+      "id": "IMPL-AFFINE-004",
+      "type": "IMPL",
+      "title": "Implement affine registration fit loop with Enzyme",
+      "status": "open",
+      "priority": 8,
+      "blockedBy": ["IMPL-AFFINE-003"],
+      "description": "Implement the optimization loop that minimizes dissimilarity. Use Enzyme.jl for gradients and Optimisers.jl for parameter updates. Handle multiresolution pyramid.",
+      "acceptanceCriteria": [
+        "Optimization loop converges on test case",
+        "Enzyme computes gradients correctly",
+        "Multiresolution (scales) works",
+        "Progress can be optionally displayed"
+      ],
+      "files": ["src/affine.jl"],
+      "torchregRef": "affine.py:_fit (line 40-50)"
+    },
+    {
+      "id": "IMPL-AFFINE-005",
+      "type": "IMPL",
+      "title": "Implement register and transform API",
+      "status": "open",
+      "priority": 8,
+      "blockedBy": ["IMPL-AFFINE-004"],
+      "description": "Implement the main API: register(moving, static, reg::AffineRegistration), transform(image, reg), get_affine(reg). These are the user-facing functions.",
+      "acceptanceCriteria": [
+        "register() runs full registration and returns moved image",
+        "transform() applies learned transform to new images",
+        "get_affine() returns the affine matrix",
+        "API is clean and Julian"
+      ],
+      "files": ["src/affine.jl"],
+      "torchregRef": "affine.py:__call__ (line 27-38), transform (line 52-54), get_affine (line 56-58)"
+    },
+    {
+      "id": "TEST-AFFINE-001",
+      "type": "TEST",
+      "title": "Parity tests for AffineRegistration",
+      "status": "open",
+      "priority": 9,
+      "blockedBy": ["IMPL-AFFINE-005"],
+      "description": "Write comprehensive parity tests for AffineRegistration. Test: (1) compose_affine produces same matrix as torchreg, (2) affine_transform produces same output, (3) Full registration on synthetic data converges similarly.",
+      "acceptanceCriteria": [
+        "compose_affine matches torchreg within rtol=1e-5",
+        "affine_transform matches within rtol=1e-4",
+        "Registration converges to similar parameters (rtol=1e-2)",
+        "Tests cover 2D and 3D, batch_size=1 and 2"
+      ],
+      "files": ["test/test_affine.jl"]
+    },
+    {
+      "id": "IMPL-SYN-001",
+      "type": "IMPL",
+      "title": "Implement SyN diffeomorphic transform base",
+      "status": "open",
+      "priority": 10,
+      "blockedBy": ["TEST-AFFINE-001"],
+      "description": "Implement the core diffeomorphic operations: diffeomorphic_transform (scaling-and-squaring), spatial_transform, composition_transform. These form the basis of SyN.",
+      "acceptanceCriteria": [
+        "diffeomorphic_transform implements scaling-and-squaring",
+        "spatial_transform warps images by velocity field",
+        "composition_transform composes two velocity fields",
+        "time_steps parameter controls integration accuracy"
+      ],
+      "files": ["src/syn.jl"],
+      "torchregRef": "syn.py:SyNBase (line 11-40)"
+    },
+    {
+      "id": "IMPL-SYN-002",
+      "type": "IMPL",
+      "title": "Implement apply_flows and Gaussian smoothing",
+      "status": "open",
+      "priority": 10,
+      "blockedBy": ["IMPL-SYN-001"],
+      "description": "Implement apply_flows() that applies forward and inverse flows to images. Implement gauss_smoothing() for flow regularization during optimization.",
+      "acceptanceCriteria": [
+        "apply_flows returns half and full transformed images",
+        "apply_flows returns corresponding flow fields",
+        "gauss_smoothing produces smoothed velocity fields",
+        "All operations preserve differentiability"
+      ],
+      "files": ["src/syn.jl"],
+      "torchregRef": "syn.py:apply_flows (line 16-26), gauss_smoothing (line 113-119)"
+    },
+    {
+      "id": "IMPL-SYN-003",
+      "type": "IMPL",
+      "title": "Implement SyNRegistration struct and fit loop",
+      "status": "open",
+      "priority": 11,
+      "blockedBy": ["IMPL-SYN-002"],
+      "description": "Implement SyNRegistration struct with all config (scales, iterations, regularization, etc). Implement the fit loop that optimizes velocity fields v_xy and v_yx.",
+      "acceptanceCriteria": [
+        "SyNRegistration struct with all parameters",
+        "fit() optimizes bidirectional velocity fields",
+        "Combines dissimilarity + regularization loss",
+        "Multiresolution pyramid works"
+      ],
+      "files": ["src/syn.jl"],
+      "torchregRef": "syn.py:SyNRegistration (line 43-110)"
+    },
+    {
+      "id": "IMPL-SYN-004",
+      "type": "IMPL",
+      "title": "Implement SyN register API",
+      "status": "open",
+      "priority": 11,
+      "blockedBy": ["IMPL-SYN-003"],
+      "description": "Implement register(moving, static, reg::SyNRegistration) that returns moved images and flow fields in both directions.",
+      "acceptanceCriteria": [
+        "Returns (moved_xy, moved_yx, flow_xy, flow_yx)",
+        "Flows have correct shape for Julia conventions",
+        "Can initialize with pre-computed velocity fields",
+        "API is consistent with AffineRegistration"
+      ],
+      "files": ["src/syn.jl"],
+      "torchregRef": "syn.py:__call__ (line 62-83)"
+    },
+    {
+      "id": "TEST-SYN-001",
+      "type": "TEST",
+      "title": "Parity tests for SyNRegistration",
+      "status": "open",
+      "priority": 12,
+      "blockedBy": ["IMPL-SYN-004"],
+      "description": "Write parity tests for SyN registration. Note: torchreg's SyN tests are TODO, so focus on: (1) diffeomorphic_transform matches, (2) gauss_smoothing matches, (3) Basic registration converges.",
+      "acceptanceCriteria": [
+        "diffeomorphic_transform matches torchreg within rtol=1e-4",
+        "gauss_smoothing matches within rtol=1e-5",
+        "SyN registration runs without error on 3D data",
+        "Output images are visually reasonable (not NaN/Inf)"
+      ],
+      "files": ["test/test_syn.jl"]
+    },
+    {
+      "id": "IMPL-2D-001",
+      "type": "IMPL",
+      "title": "Verify and fix 2D support across all components",
+      "status": "open",
+      "priority": 13,
+      "blockedBy": ["TEST-SYN-001"],
+      "description": "Go through all implementations and ensure 2D (ndims=2) works correctly. The is_3d flag in torchreg controls this; we use ndims parameter.",
+      "acceptanceCriteria": [
+        "AffineRegistration works with 2D arrays (X, Y, C, N)",
+        "All metrics work with 2D",
+        "SyN works with 2D (note: torchreg SyN is 3D-only currently)",
+        "Tests pass for both 2D and 3D"
+      ],
+      "files": ["src/affine.jl", "src/syn.jl", "src/metrics.jl", "src/utils.jl"]
+    },
+    {
+      "id": "TEST-INTEGRATION-001",
+      "type": "TEST",
+      "title": "End-to-end integration tests",
+      "status": "open",
+      "priority": 14,
+      "blockedBy": ["IMPL-2D-001"],
+      "description": "Write integration tests that exercise the full registration pipeline: load images, register, verify output quality. Include synthetic test cases with known ground truth.",
+      "acceptanceCriteria": [
+        "Synthetic translation test: registration recovers translation",
+        "Synthetic rotation test: registration recovers rotation",
+        "Affine + SyN pipeline works in sequence",
+        "No memory leaks or type instabilities"
+      ],
+      "files": ["test/runtests.jl"]
+    },
+    {
+      "id": "CLEANUP-001",
+      "type": "IMPL",
+      "title": "Final cleanup and export verification",
+      "status": "open",
+      "priority": 15,
+      "blockedBy": ["TEST-INTEGRATION-001"],
+      "description": "Final pass: verify all exports work, remove any TODO comments, ensure consistent code style, verify package loads cleanly.",
+      "acceptanceCriteria": [
+        "using MedicalImageRegistration loads without warnings",
+        "All exported functions are documented with docstrings",
+        "No remaining TODO/FIXME comments",
+        "Package precompiles successfully"
+      ],
+      "files": ["src/MedicalImageRegistration.jl"]
+    }
+  ],
+  "completedStories": []
+}
