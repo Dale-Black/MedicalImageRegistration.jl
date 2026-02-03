@@ -219,6 +219,268 @@ function composition_transform(
 end
 
 # ============================================================================
+# Apply Flows (Bidirectional Warping)
+# ============================================================================
+
+"""
+    FlowResult{T}
+
+Named tuple containing the results of apply_flows.
+
+# Fields
+- `images`: NamedTuple with keys `xy_half`, `yx_half`, `xy_full`, `yx_full`
+- `flows`: NamedTuple with keys `xy_half`, `yx_half`, `xy_full`, `yx_full`
+"""
+const FlowResult{T} = @NamedTuple{
+    images::@NamedTuple{xy_half::Array{T,5}, yx_half::Array{T,5}, xy_full::Array{T,5}, yx_full::Array{T,5}},
+    flows::@NamedTuple{xy_half::Array{T,5}, yx_half::Array{T,5}, xy_full::Array{T,5}, yx_full::Array{T,5}}
+}
+
+"""
+    apply_flows(x, y, v_xy, v_yx; time_steps=7)
+
+Apply bidirectional flows to images for symmetric registration.
+
+# Arguments
+- `x`: Moving image, shape `(X, Y, Z, C, N)`
+- `y`: Static image, shape `(X, Y, Z, C, N)`
+- `v_xy`: Velocity field x→y (moving to static), shape `(X, Y, Z, 3, N)`
+- `v_yx`: Velocity field y→x (static to moving), shape `(X, Y, Z, 3, N)`
+- `time_steps`: Number of scaling-and-squaring steps (default 7)
+
+# Returns
+Named tuple with two fields:
+- `images`: NamedTuple containing:
+  - `xy_half`: x warped halfway toward y
+  - `yx_half`: y warped halfway toward x
+  - `xy_full`: x fully warped to y space
+  - `yx_full`: y fully warped to x space
+- `flows`: NamedTuple containing:
+  - `xy_half`, `yx_half`, `xy_full`, `yx_full`: corresponding displacement fields
+
+# Algorithm
+1. Compute half flows: exp(v_xy), exp(v_yx), exp(-v_xy), exp(-v_yx) using diffeomorphic_transform
+2. Compute half images: warp x and y using forward half flows
+3. Compute full flows: compose half flows (forward half + inverted backward half)
+4. Compute full images: warp x and y using full flows
+
+# Notes
+The midpoint images (xy_half, yx_half) should be similar - this is the symmetric loss term.
+Full images represent the complete transformation from one space to the other.
+"""
+function apply_flows(
+    x::AbstractArray{T, 5},
+    y::AbstractArray{T, 5},
+    v_xy::AbstractArray{T, 5},
+    v_yx::AbstractArray{T, 5};
+    time_steps::Int = 7
+) where T
+    @assert size(x) == size(y) "x and y must have same shape"
+    @assert size(v_xy) == size(v_yx) "v_xy and v_yx must have same shape"
+    @assert size(x)[1:3] == size(v_xy)[1:3] "Spatial dimensions must match"
+
+    X, Y, Z = size(x)[1:3]
+    N = size(x, 5)
+
+    # Get identity grid for all operations
+    id_grid = ignore_derivatives() do
+        get_identity_grid((X, Y, Z), T)
+    end
+
+    # Concatenate velocity fields for batch processing:
+    # [v_xy, v_yx, -v_xy, -v_yx] along batch dimension
+    # This computes all 4 diffeomorphic transforms at once
+    neg_v_xy = -v_xy
+    neg_v_yx = -v_yx
+    v_all = cat(v_xy, v_yx, neg_v_xy, neg_v_yx; dims=5)  # (X, Y, Z, 3, 4N)
+
+    # Compute all half flows using diffeomorphic transform
+    half_flows_all = diffeomorphic_transform(v_all; time_steps=time_steps, id_grid=id_grid)
+
+    # Split back into individual flows
+    # half_flows_all has shape (X, Y, Z, 3, 4N) where batch dim contains:
+    # [flow_xy (N), flow_yx (N), flow_neg_xy (N), flow_neg_yx (N)]
+    half_flow_xy = half_flows_all[:, :, :, :, 1:N]           # exp(v_xy)
+    half_flow_yx = half_flows_all[:, :, :, :, N+1:2N]        # exp(v_yx)
+    half_flow_neg_xy = half_flows_all[:, :, :, :, 2N+1:3N]   # exp(-v_xy)
+    half_flow_neg_yx = half_flows_all[:, :, :, :, 3N+1:4N]   # exp(-v_yx)
+
+    # Compute half images: warp x with half_flow_xy, y with half_flow_yx
+    # Concatenate images for batch processing
+    xy_cat = cat(x, y; dims=5)  # (X, Y, Z, C, 2N)
+    half_flows_forward = cat(half_flow_xy, half_flow_yx; dims=5)  # (X, Y, Z, 3, 2N)
+    half_images_all = spatial_transform(xy_cat, half_flows_forward; id_grid=id_grid)
+
+    # Split half images
+    C = size(x, 4)
+    xy_half = half_images_all[:, :, :, :, 1:N]      # x warped halfway
+    yx_half = half_images_all[:, :, :, :, N+1:2N]   # y warped halfway
+
+    # Compute full flows by composition:
+    # full_xy = half_xy ∘ half_neg_yx (forward then back of inverse)
+    # full_yx = half_yx ∘ half_neg_xy
+    # Following torchreg: composition_transform(half_flows[:2], half_flows[2:].flip(0))
+    # half_flows[2:].flip(0) means: [half_neg_yx, half_neg_xy] (reversed order)
+    full_flow_xy = composition_transform(half_flow_xy, half_flow_neg_yx; id_grid=id_grid)
+    full_flow_yx = composition_transform(half_flow_yx, half_flow_neg_xy; id_grid=id_grid)
+
+    # Compute full images
+    full_flows = cat(full_flow_xy, full_flow_yx; dims=5)
+    full_images_all = spatial_transform(xy_cat, full_flows; id_grid=id_grid)
+
+    xy_full = full_images_all[:, :, :, :, 1:N]      # x fully warped to y space
+    yx_full = full_images_all[:, :, :, :, N+1:2N]   # y fully warped to x space
+
+    # Package results
+    images = (
+        xy_half = xy_half,
+        yx_half = yx_half,
+        xy_full = xy_full,
+        yx_full = yx_full
+    )
+
+    flows = (
+        xy_half = half_flow_xy,
+        yx_half = half_flow_yx,
+        xy_full = full_flow_xy,
+        yx_full = full_flow_yx
+    )
+
+    return (images = images, flows = flows)
+end
+
+# ============================================================================
+# Gaussian Smoothing for Velocity Fields
+# ============================================================================
+
+"""
+    gauss_smoothing(x::AbstractArray{T, 5}, sigma::Union{T, AbstractVector{T}}) where T
+
+Apply Gaussian smoothing to a 5D array (velocity field or image).
+
+# Arguments
+- `x`: Input array, shape `(X, Y, Z, C, N)`
+- `sigma`: Smoothing standard deviation. Can be:
+  - A scalar (applied uniformly to all spatial dimensions)
+  - A vector of length 3 (separate sigma for X, Y, Z)
+
+# Returns
+- Smoothed array of same shape
+
+# Algorithm
+1. Compute kernel size based on spatial dimensions: half_ks = spatial_size ÷ 50 (clamped to min 1)
+2. Kernel size = 1 + 2 * half_ks (ensures odd size)
+3. Create separable Gaussian kernel
+4. Apply depthwise 3D convolution with replicate padding
+
+# Notes
+- Kernel size adapts to image size to ensure adequate smoothing coverage
+- Uses replicate padding at boundaries
+- Convolution is applied channel-wise (depthwise convolution)
+
+# Example
+```julia
+v = randn(Float32, 64, 64, 64, 3, 1)  # Velocity field
+sigma = 0.2f0
+v_smooth = gauss_smoothing(v, sigma)
+```
+"""
+function gauss_smoothing(
+    x::AbstractArray{T, 5},
+    sigma
+) where T
+    X, Y, Z, C, N = size(x)
+
+    # Convert sigma to a vector of the correct type
+    if sigma isa Number
+        sigma_vec = fill(T(sigma), 3)
+    else
+        @assert length(sigma) == 3 "sigma vector must have length 3"
+        sigma_vec = T.(sigma)
+    end
+
+    # Compute kernel size based on spatial dimensions (following torchreg)
+    # half_kernel_size = spatial_size // 50, clamped to min 1
+    half_ks_x = max(1, X ÷ 50)
+    half_ks_y = max(1, Y ÷ 50)
+    half_ks_z = max(1, Z ÷ 50)
+
+    # Kernel size = 1 + 2 * half_ks (odd sizes)
+    ks_x = 1 + 2 * half_ks_x
+    ks_y = 1 + 2 * half_ks_y
+    ks_z = 1 + 2 * half_ks_z
+
+    kernel_size = (ks_x, ks_y, ks_z)
+
+    # Create Gaussian kernel (constant w.r.t. optimization, so no gradient needed)
+    kernel = ignore_derivatives() do
+        smooth_kernel(kernel_size, NTuple{3, T}(sigma_vec))  # (ks_x, ks_y, ks_z)
+    end
+
+    # Apply depthwise 3D convolution with replicate padding
+    # Need to reshape kernel for NNlib.conv: (W, H, D, Cin, Cout)
+    # For depthwise conv: Cin=1, Cout=1, applied C times with groups=C
+
+    # Pad input with replicate padding
+    # Padding: (left, right, top, bottom, front, back) -> in Julia order: (x_lo, x_hi, y_lo, y_hi, z_lo, z_hi)
+    pad_x = half_ks_x
+    pad_y = half_ks_y
+    pad_z = half_ks_z
+
+    # Reshape kernel for conv: (ks_x, ks_y, ks_z) -> (ks_x, ks_y, ks_z, 1, 1)
+    kernel_5d = ignore_derivatives() do
+        reshape(kernel, ks_x, ks_y, ks_z, 1, 1)
+    end
+
+    # Pad the entire array first
+    x_padded = pad_replicate_full(x, pad_x, pad_y, pad_z)
+
+    # Apply convolution to each channel independently using map/stack
+    # This avoids in-place mutation that Zygote can't handle
+    results = [
+        begin
+            # Extract single channel across all batches: (X_pad, Y_pad, Z_pad, 1, N)
+            slice = x_padded[:, :, :, c:c, :]
+            # Conv each batch element
+            conv_results = map(1:N) do n
+                s = slice[:, :, :, :, n:n]  # (X_pad, Y_pad, Z_pad, 1, 1)
+                NNlib.conv(s, kernel_5d)    # (X, Y, Z, 1, 1)
+            end
+            cat(conv_results...; dims=5)  # (X, Y, Z, 1, N)
+        end
+        for c in 1:C
+    ]
+
+    # Concatenate along channel dimension
+    return cat(results...; dims=4)
+end
+
+"""
+    pad_replicate_full(x::AbstractArray{T, 5}, pad_x::Int, pad_y::Int, pad_z::Int) where T
+
+Apply replicate (edge) padding to a 5D array without mutation.
+"""
+function pad_replicate_full(
+    x::AbstractArray{T, 5},
+    pad_x::Int,
+    pad_y::Int,
+    pad_z::Int
+) where T
+    X, Y, Z, C, N = size(x)
+
+    new_X = X + 2 * pad_x
+    new_Y = Y + 2 * pad_y
+    new_Z = Z + 2 * pad_z
+
+    # Create index arrays for replicate padding
+    ix = [clamp(i - pad_x, 1, X) for i in 1:new_X]
+    iy = [clamp(j - pad_y, 1, Y) for j in 1:new_Y]
+    iz = [clamp(k - pad_z, 1, Z) for k in 1:new_Z]
+
+    return x[ix, iy, iz, :, :]
+end
+
+# ============================================================================
 # SyNRegistration Type
 # ============================================================================
 

@@ -340,7 +340,7 @@
       "id": "IMPL-SYN-002",
       "type": "IMPL",
       "title": "Implement apply_flows and Gaussian smoothing",
-      "status": "open",
+      "status": "done",
       "priority": 10,
       "blockedBy": ["IMPL-SYN-001"],
       "description": "Implement apply_flows() that applies forward and inverse flows to images. Implement gauss_smoothing() for flow regularization during optimization.",

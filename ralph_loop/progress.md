@@ -1798,3 +1798,101 @@ All functional tests pass:
 3. **Array convention**: Velocity field shape is `(X, Y, Z, 3, N)` in Julia vs `(N, 3, Z, Y, X)` in PyTorch.
 
 ---
+
+## [IMPL-SYN-002] Implement apply_flows and Gaussian smoothing
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+### Implementation Summary
+
+Implemented `apply_flows` and `gauss_smoothing` functions in `src/syn.jl` for bidirectional SyN registration.
+
+#### apply_flows(x, y, v_xy, v_yx)
+
+Applies bidirectional velocity fields to compute half and full warped images:
+
+```julia
+function apply_flows(x, y, v_xy, v_yx; time_steps=7)
+    # 1. Compute half flows: exp(v_xy), exp(v_yx), exp(-v_xy), exp(-v_yx)
+    v_all = cat(v_xy, v_yx, -v_xy, -v_yx; dims=5)
+    half_flows_all = diffeomorphic_transform(v_all; time_steps=time_steps)
+
+    # 2. Compute half images: warp x and y using forward half flows
+    xy_cat = cat(x, y; dims=5)
+    half_images = spatial_transform(xy_cat, half_flows_forward)
+
+    # 3. Compute full flows by composition:
+    #    full_xy = half_xy ∘ half_neg_yx
+    full_flow_xy = composition_transform(half_flow_xy, half_flow_neg_yx)
+    full_flow_yx = composition_transform(half_flow_yx, half_flow_neg_xy)
+
+    # 4. Compute full images
+    full_images = spatial_transform(xy_cat, full_flows)
+
+    return (images = ..., flows = ...)
+end
+```
+
+**Return structure:**
+- `images.xy_half`: x warped halfway toward y
+- `images.yx_half`: y warped halfway toward x
+- `images.xy_full`: x fully warped to y space
+- `images.yx_full`: y fully warped to x space
+- Corresponding flow fields in `flows`
+
+#### gauss_smoothing(x, sigma)
+
+Applies Gaussian smoothing to 5D arrays (velocity fields or images):
+
+```julia
+function gauss_smoothing(x, sigma)
+    # Kernel size adapts to spatial dimensions: ks = 1 + 2 * max(1, size ÷ 50)
+    # Creates separable Gaussian kernel
+    # Applies depthwise 3D convolution with replicate padding
+end
+```
+
+**Key features:**
+- Kernel size adapts to image size (following torchreg formula)
+- Supports scalar or vector sigma
+- Uses replicate (edge) padding
+- Fully differentiable with Zygote
+
+#### Zygote Compatibility
+
+Made all operations Zygote-compatible:
+- Kernel creation wrapped in `ignore_derivatives` (constant w.r.t. optimization)
+- Padding uses fancy indexing instead of mutation
+- Convolution uses `map` + `cat` instead of in-place assignment
+
+### Test Results
+
+| Test | Result |
+|------|--------|
+| gauss_smoothing scalar sigma | ✅ Works |
+| gauss_smoothing vector sigma | ✅ Works |
+| gauss_smoothing reduces variance | ✅ True |
+| apply_flows zero velocity | ✅ Identity preserved |
+| apply_flows batch support (N=2) | ✅ Correct shapes |
+| Zygote gradient through gauss_smoothing | ✅ Finite, non-zero |
+| Zygote gradient through apply_flows | ✅ Finite, non-zero |
+| Zygote gradient through combined SyN-style loss | ✅ Finite, non-zero |
+
+### Acceptance Criteria Verification
+
+- ✅ apply_flows returns half and full transformed images
+- ✅ apply_flows returns corresponding flow fields
+- ✅ gauss_smoothing produces smoothed velocity fields
+- ✅ All operations preserve differentiability (Zygote works)
+
+### Notes
+
+1. **Kernel size formula**: Following torchreg, kernel size = 1 + 2 * max(1, spatial_size ÷ 50). For typical medical images (64-256 voxels), this gives kernels of 3-9 voxels.
+
+2. **Padding**: Uses replicate padding to avoid boundary artifacts. NNlib doesn't have this built-in, so implemented `pad_replicate_full` using fancy indexing.
+
+3. **Memory efficiency**: For batch processing, concatenates inputs along batch dimension to minimize number of grid_sample calls.
+
+---
