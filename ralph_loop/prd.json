@@ -323,7 +323,7 @@
       "id": "IMPL-SYN-001",
       "type": "IMPL",
       "title": "Implement SyN diffeomorphic transform base",
-      "status": "open",
+      "status": "done",
       "priority": 10,
       "blockedBy": ["TEST-AFFINE-001"],
       "description": "Implement the core diffeomorphic operations: diffeomorphic_transform (scaling-and-squaring), spatial_transform, composition_transform. These form the basis of SyN.",

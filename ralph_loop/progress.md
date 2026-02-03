@@ -1660,3 +1660,141 @@ Implemented comprehensive parity tests in `test/test_affine.jl` comparing Julia 
 3. **Axis permutation**: Julia `(ndim, ndim+1, N)` ↔ PyTorch `(N, ndim, ndim+1)` via `permutedims(arr, (3, 1, 2))`
 
 ---
+
+## [IMPL-SYN-001] Implement SyN diffeomorphic transform base
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+### Implementation Summary
+
+Implemented the core SyN diffeomorphic operations in `src/syn.jl`:
+
+1. **`spatial_transform(x, v)`** - Warp images using velocity/displacement fields
+2. **`diffeomorphic_transform(v)`** - Scaling-and-squaring algorithm
+3. **`composition_transform(v1, v2)`** - Compose two velocity fields
+
+#### spatial_transform(x, v)
+
+Warps image `x` using displacement field `v`:
+
+```julia
+function spatial_transform(x::AbstractArray{T, 5}, v::AbstractArray{T, 5}; id_grid=nothing)
+    # x: (X, Y, Z, C, N) - image
+    # v: (X, Y, Z, 3, N) - displacement in normalized [-1, 1] coords
+
+    # Create sampling grid: grid = id_grid + v
+    # Sample image at displaced positions using NNlib.grid_sample
+end
+```
+
+**Key implementation details:**
+- Velocity field `v` has shape `(X, Y, Z, 3, N)` in Julia convention
+- Identity grid cached in `GRID_CACHE` for efficiency
+- Uses `NNlib.grid_sample` with `:border` padding mode
+- Grid coordinates are in normalized [-1, 1] range
+
+#### diffeomorphic_transform(v; time_steps=7)
+
+Implements scaling-and-squaring to convert velocity field to diffeomorphism:
+
+```julia
+function diffeomorphic_transform(v; time_steps=7)
+    # Algorithm: exp(v) = exp(v/2^N)^(2^N)
+
+    v_scaled = v / 2^time_steps
+
+    for _ in 1:time_steps
+        v_scaled = v_scaled + spatial_transform(v_scaled, v_scaled)
+    end
+
+    return v_scaled
+end
+```
+
+**Mathematical background:**
+- For stationary velocity field v, φ = exp(v) is the diffeomorphism
+- Scaling: v_small = v / 2^N (so exp(v_small) ≈ v_small for small fields)
+- Squaring: compose field with itself N times to get exp(v)
+- Guarantees smooth, invertible transformation
+
+#### composition_transform(v1, v2)
+
+Composes two displacement fields:
+
+```julia
+# v_composed = v2 + v1(v2)
+# First apply v2, then sample v1 at displaced positions and add
+v_composed = v2 + spatial_transform(v1, v2)
+```
+
+#### Grid Cache
+
+Added `GRID_CACHE` dictionary to avoid recomputing identity grids:
+
+```julia
+const GRID_CACHE = Dict{Tuple{Tuple{Vararg{Int}}, DataType}, Array}()
+
+function get_identity_grid(spatial_size, T)
+    key = (spatial_size, T)
+    if !haskey(GRID_CACHE, key)
+        GRID_CACHE[key] = create_identity_grid(spatial_size, T)
+    end
+    return GRID_CACHE[key]
+end
+```
+
+#### SyNRegistration Type (Minimal)
+
+Created minimal `SyNRegistration` struct for subsequent stories:
+
+```julia
+mutable struct SyNRegistration{T, F, R, O} <: AbstractRegistration
+    scales::Tuple{Vararg{Int}}
+    iterations::Tuple{Vararg{Int}}
+    learning_rates::Vector{T}
+    verbose::Bool
+    dissimilarity_fn::F
+    regularization_fn::R
+    optimizer::O
+    sigma_img::T
+    sigma_flow::T
+    lambda_::T
+    time_steps::Int
+    v_xy::Union{Nothing, Array{T, 5}}  # Velocity: moving → static
+    v_yx::Union{Nothing, Array{T, 5}}  # Velocity: static → moving
+end
+```
+
+### Test Results
+
+All functional tests pass:
+
+| Test | Result |
+|------|--------|
+| spatial_transform with zero displacement | ✅ Identity preserved |
+| spatial_transform with non-zero displacement | ✅ Image warped |
+| diffeomorphic_transform with zero velocity | ✅ Zero displacement |
+| diffeomorphic_transform with non-zero velocity | ✅ Finite displacement |
+| composition_transform(v1, zero) | ✅ Returns v1 |
+| Batch support (N > 1) | ✅ Correct shapes |
+| Zygote gradient through spatial_transform | ✅ Finite gradients |
+| Zygote gradient through diffeomorphic_transform | ✅ Finite gradients |
+
+### Acceptance Criteria Verification
+
+- ✅ diffeomorphic_transform implements scaling-and-squaring
+- ✅ spatial_transform warps images by velocity field
+- ✅ composition_transform composes two velocity fields
+- ✅ time_steps parameter controls integration accuracy (default 7)
+
+### Notes
+
+1. **NNlib padding**: NNlib doesn't support `:reflection` padding (which torchreg uses), so using `:border` instead. This should have minimal impact on results.
+
+2. **Zygote compatibility**: Used `ignore_derivatives` for grid creation to avoid recomputing constant grids during backprop.
+
+3. **Array convention**: Velocity field shape is `(X, Y, Z, 3, N)` in Julia vs `(N, 3, Z, Y, X)` in PyTorch.
+
+---
