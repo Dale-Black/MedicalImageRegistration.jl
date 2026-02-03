@@ -423,7 +423,7 @@
       "id": "TEST-INTEGRATION-001",
       "type": "TEST",
       "title": "End-to-end integration tests",
-      "status": "open",
+      "status": "done",
       "priority": 14,
       "blockedBy": ["IMPL-2D-001"],
       "description": "Write integration tests that exercise the full registration pipeline: load images, register, verify output quality. Include synthetic test cases with known ground truth.",
