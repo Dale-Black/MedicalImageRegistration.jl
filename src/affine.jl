@@ -1,7 +1,8 @@
 # Affine registration implementation
 
 using Optimisers: Adam
-using Zygote: ignore_derivatives
+
+# Note: _constant() is defined in utils.jl
 
 # Default MSE loss for affine registration
 """
@@ -356,7 +357,7 @@ function compose_affine(
         # [zoom_x  shear_xy  shear_xz]
         # [  0     zoom_y    shear_yz]
         # [  0       0       zoom_z  ]
-        z_zeros = ignore_derivatives() do
+        z_zeros = _constant() do
             zeros(T, 1, batch_size)
         end
 
@@ -389,7 +390,7 @@ function compose_affine(
         # 2D case: scale_shear is a 2x2 upper triangular matrix
         # [zoom_x  shear_xy]
         # [  0     zoom_y  ]
-        z_zeros = ignore_derivatives() do
+        z_zeros = _constant() do
             zeros(T, 1, batch_size)
         end
 
@@ -591,6 +592,206 @@ function downsample(x::AbstractArray{T, 5}, scale::Int) where T
 end
 
 # ============================================================================
+# Manual Gradient Computation Helpers
+# ============================================================================
+
+"""
+    _affine_grid_backward(d_grid, spatial_size, batch_size, ::Type{T}) where T
+
+Compute gradient of affine_grid with respect to theta (affine matrix).
+
+Given d_grid (gradient w.r.t. output grid), computes d_theta.
+
+affine_grid computes: output = theta @ homogeneous_coords
+So the gradient is: d_theta = d_output @ homogeneous_coords^T
+"""
+function _affine_grid_backward(
+    d_grid::AbstractArray{T},
+    spatial_size::NTuple{N, Int},
+    batch_size::Int
+) where {T, N}
+    ndim = N
+    num_points = prod(spatial_size)
+
+    # Create identity grid and homogeneous coordinates
+    id_grid = create_identity_grid(spatial_size, T)
+    flat_grid = reshape(id_grid, ndim, num_points)
+    ones_row = ones(T, 1, num_points)
+    homogeneous_grid = vcat(flat_grid, ones_row)  # (ndim+1, num_points)
+
+    # d_grid is (ndim, ...spatial..., batch_size)
+    d_grid_flat = reshape(d_grid, ndim, num_points, batch_size)
+
+    # d_theta = d_grid_flat @ homogeneous_grid^T for each batch
+    d_theta = zeros(T, ndim, ndim + 1, batch_size)
+    @inbounds for n in 1:batch_size
+        d_theta[:, :, n] = d_grid_flat[:, :, n] * homogeneous_grid'
+    end
+
+    return d_theta
+end
+
+"""
+    _compose_affine_backward_3d(d_affine, rotation, zoom, shear)
+
+Compute gradients of compose_affine with respect to translation, rotation, zoom, shear.
+
+For 3D case: affine = [rotation @ scale_shear | translation]
+where scale_shear is upper triangular with zoom on diagonal and shear off-diagonal.
+"""
+function _compose_affine_backward_3d(
+    d_affine::AbstractArray{T, 3},
+    rotation::AbstractArray{T, 3},
+    zoom::AbstractArray{T, 2},
+    shear::AbstractArray{T, 2}
+) where T
+    batch_size = size(zoom, 2)
+
+    # Reconstruct scale_shear matrix
+    scale_shear = zeros(T, 3, 3, batch_size)
+    @inbounds for n in 1:batch_size
+        scale_shear[1, 1, n] = zoom[1, n]
+        scale_shear[1, 2, n] = shear[1, n]
+        scale_shear[1, 3, n] = shear[2, n]
+        scale_shear[2, 2, n] = zoom[2, n]
+        scale_shear[2, 3, n] = shear[3, n]
+        scale_shear[3, 3, n] = zoom[3, n]
+    end
+
+    # d_translation = d_affine[:, 4, :] (last column)
+    d_translation = d_affine[:, 4, :]
+
+    # d_rot_scale = d_affine[:, 1:3, :] (first 3 columns)
+    d_rot_scale = d_affine[:, 1:3, :]
+
+    # rot_scale = rotation @ scale_shear
+    # d_rotation = d_rot_scale @ scale_shear^T
+    # d_scale_shear = rotation^T @ d_rot_scale
+    d_rotation = NNlib.batched_mul(d_rot_scale, NNlib.batched_transpose(scale_shear))
+    d_scale_shear = NNlib.batched_mul(NNlib.batched_transpose(rotation), d_rot_scale)
+
+    # Extract d_zoom and d_shear from d_scale_shear
+    d_zoom = zeros(T, 3, batch_size)
+    d_shear = zeros(T, 3, batch_size)
+    @inbounds for n in 1:batch_size
+        d_zoom[1, n] = d_scale_shear[1, 1, n]
+        d_zoom[2, n] = d_scale_shear[2, 2, n]
+        d_zoom[3, n] = d_scale_shear[3, 3, n]
+        d_shear[1, n] = d_scale_shear[1, 2, n]
+        d_shear[2, n] = d_scale_shear[1, 3, n]
+        d_shear[3, n] = d_scale_shear[2, 3, n]
+    end
+
+    return d_translation, d_rotation, d_zoom, d_shear
+end
+
+"""
+    _compose_affine_backward_2d(d_affine, rotation, zoom, shear)
+
+Compute gradients of compose_affine with respect to translation, rotation, zoom, shear.
+
+For 2D case: affine = [rotation @ scale_shear | translation]
+"""
+function _compose_affine_backward_2d(
+    d_affine::AbstractArray{T, 3},
+    rotation::AbstractArray{T, 3},
+    zoom::AbstractArray{T, 2},
+    shear::AbstractArray{T, 2}
+) where T
+    batch_size = size(zoom, 2)
+
+    # Reconstruct scale_shear matrix for 2D
+    scale_shear = zeros(T, 2, 2, batch_size)
+    @inbounds for n in 1:batch_size
+        scale_shear[1, 1, n] = zoom[1, n]
+        scale_shear[1, 2, n] = shear[1, n]
+        scale_shear[2, 2, n] = zoom[2, n]
+    end
+
+    # d_translation = d_affine[:, 3, :] (last column for 2D)
+    d_translation = d_affine[:, 3, :]
+
+    # d_rot_scale = d_affine[:, 1:2, :] (first 2 columns)
+    d_rot_scale = d_affine[:, 1:2, :]
+
+    # Backprop through matrix multiply
+    d_rotation = NNlib.batched_mul(d_rot_scale, NNlib.batched_transpose(scale_shear))
+    d_scale_shear = NNlib.batched_mul(NNlib.batched_transpose(rotation), d_rot_scale)
+
+    # Extract d_zoom and d_shear
+    d_zoom = zeros(T, 2, batch_size)
+    d_shear = zeros(T, 2, batch_size)
+    @inbounds for n in 1:batch_size
+        d_zoom[1, n] = d_scale_shear[1, 1, n]
+        d_zoom[2, n] = d_scale_shear[2, 2, n]
+        d_shear[1, n] = d_scale_shear[1, 2, n]
+    end
+
+    return d_translation, d_rotation, d_zoom, d_shear
+end
+
+"""
+    _compute_affine_gradients(moving, static, translation, rotation, zoom, shear,
+                              target_shape, padding_mode, dissimilarity_fn)
+
+Compute loss and gradients for affine registration using manual backpropagation.
+
+Returns: (loss_value, d_translation, d_rotation, d_zoom, d_shear)
+"""
+function _compute_affine_gradients(
+    moving::AbstractArray{T},
+    static::AbstractArray{T},
+    translation::AbstractArray{T, 2},
+    rotation::AbstractArray{T, 3},
+    zoom::AbstractArray{T, 2},
+    shear::AbstractArray{T, 2},
+    target_shape,
+    padding_mode::Symbol,
+    dissimilarity_fn
+) where T
+    ndim = size(zoom, 1)
+    batch_size = size(zoom, 2)
+
+    # ========== Forward Pass ==========
+    # 1. Compose affine matrix
+    affine = compose_affine(translation, rotation, zoom, shear)
+
+    # 2. Create sampling grid
+    grid = affine_grid(affine, target_shape)
+
+    # 3. Sample moving image at grid positions
+    moved = NNlib.grid_sample(moving, grid; padding_mode=padding_mode)
+
+    # 4. Compute loss (MSE for now, which has simple gradient)
+    # For MSE: loss = mean((moved - static)^2)
+    diff = moved .- static
+    loss_val = mean(diff .^ 2)
+
+    # ========== Backward Pass ==========
+    # 1. Gradient of MSE loss: d_moved = 2 * (moved - static) / numel
+    d_moved = T(2) .* diff ./ T(length(moved))
+
+    # 2. Gradient through grid_sample using NNlib.∇grid_sample
+    _, d_grid = NNlib.∇grid_sample(d_moved, moving, grid; padding_mode=padding_mode)
+
+    # 3. Gradient through affine_grid
+    d_affine = _affine_grid_backward(d_grid, target_shape, batch_size)
+
+    # 4. Gradient through compose_affine
+    if ndim == 3
+        d_translation, d_rotation, d_zoom, d_shear = _compose_affine_backward_3d(
+            d_affine, rotation, zoom, shear
+        )
+    else
+        d_translation, d_rotation, d_zoom, d_shear = _compose_affine_backward_2d(
+            d_affine, rotation, zoom, shear
+        )
+    end
+
+    return loss_val, d_translation, d_rotation, d_zoom, d_shear
+end
+
+# ============================================================================
 # Optimization Loop
 # ============================================================================
 
@@ -607,7 +808,7 @@ Run optimization for a single resolution level.
 
 # Notes
 - Modifies `reg.parameters` in place
-- Uses Zygote for gradient computation
+- Uses manual gradient computation (no AD library required)
 - Uses Optimisers.jl for parameter updates
 """
 function fit!(
@@ -622,11 +823,7 @@ function fit!(
 
     # Get spatial shape of static image
     ndim = ndims(static) - 2  # Remove C and N dimensions
-    target_shape = size(static)[1:ndim]
-
-    # Pack parameters into a tuple for optimization
-    # We need to optimize: translation, rotation, zoom, shear
-    # But only those enabled by with_* flags
+    target_shape = NTuple{ndim, Int}(size(static)[1:ndim])
 
     # Create parameter tuple based on what we're optimizing
     param_tuple = (
@@ -643,29 +840,20 @@ function fit!(
     # Optimization loop
     local loss_val
     for iter in 1:iterations
-        # Compute loss and gradients using Zygote
-        loss_val, grads = Zygote.withgradient(param_tuple) do p
-            # Unpack parameters
-            t, r, z, s = p
+        # Unpack current parameters
+        t, r, z, s = param_tuple
 
-            # Compose affine matrix
-            affine = compose_affine(t, r, z, s)
-
-            # Transform moving image
-            moved = affine_transform(moving, affine; shape=target_shape, padding_mode=reg.padding_mode)
-
-            # Compute dissimilarity
-            reg.dissimilarity_fn(moved, static)
-        end
-
-        # Get gradients
-        grad_tuple = grads[1]
+        # Compute loss and gradients using manual backpropagation
+        loss_val, d_t, d_r, d_z, d_s = _compute_affine_gradients(
+            moving, static, t, r, z, s,
+            target_shape, reg.padding_mode, reg.dissimilarity_fn
+        )
 
         # Zero out gradients for parameters we're not optimizing
-        grad_translation = reg.with_translation ? grad_tuple[1] : zero(grad_tuple[1])
-        grad_rotation = reg.with_rotation ? grad_tuple[2] : zero(grad_tuple[2])
-        grad_zoom = reg.with_zoom ? grad_tuple[3] : zero(grad_tuple[3])
-        grad_shear = reg.with_shear ? grad_tuple[4] : zero(grad_tuple[4])
+        grad_translation = reg.with_translation ? d_t : zero(d_t)
+        grad_rotation = reg.with_rotation ? d_r : zero(d_r)
+        grad_zoom = reg.with_zoom ? d_z : zero(d_z)
+        grad_shear = reg.with_shear ? d_s : zero(d_s)
 
         masked_grads = (grad_translation, grad_rotation, grad_zoom, grad_shear)
 

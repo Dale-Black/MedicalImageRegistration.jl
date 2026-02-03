@@ -4,7 +4,9 @@ module MedicalImageRegistration
 using NNlib
 using Optimisers
 using Statistics
-using Zygote
+# Note: Manual gradient computation used instead of AD library
+# This avoids Zygote (prohibited) and works around Enzyme/Mooncake limitations
+# with NNlib.grid_sample threading
 
 # Core types and utilities
 include("types.jl")

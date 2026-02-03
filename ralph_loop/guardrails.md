@@ -105,25 +105,76 @@ NNlib.grid_sample(input, grid; padding_mode=:zeros)
 - Check `align_corners` behavior carefully
 - May need to handle batch dimension differently
 
-## Enzyme.jl Usage
+## Automatic Differentiation (CRITICAL)
 
-### Basic Pattern
+### REQUIRED: Use Enzyme.jl or Mooncake.jl
+
+**DO NOT USE ZYGOTE.JL** - This is a hard requirement.
+
+The project MUST use either Enzyme.jl or Mooncake.jl for all gradient computations. Zygote.jl is NOT compatible with project requirements.
+
+**Which one to use?** See RESEARCH-AD-001 story - the ralph loop will evaluate both and choose the best option based on:
+- Compatibility with NNlib.grid_sample
+- Performance on our specific use case
+- Stability and ease of use
+- Error messages and debuggability
+
+### Enzyme.jl Basic Pattern
 ```julia
 using Enzyme
 
-# For gradient of scalar loss
+# For gradient of scalar loss with respect to parameters
 function compute_loss(params, moving, static)
     moved = transform_with_params(moving, params)
     return loss_fn(moved, static)
 end
 
-# Get gradients
-grads = Enzyme.gradient(Reverse, compute_loss, params, moving, static)
+# Using Enzyme.autodiff for reverse-mode AD
+function compute_gradients(params, moving, static)
+    dparams = Enzyme.make_zero(params)
+    Enzyme.autodiff(Reverse, compute_loss, Active, Duplicated(params, dparams), Const(moving), Const(static))
+    return dparams
+end
+```
+
+### Enzyme with Tuples of Parameters
+```julia
+# When optimizing multiple parameter arrays
+function loss_fn(translation, rotation, zoom, shear, moving, static)
+    affine = compose_affine(translation, rotation, zoom, shear)
+    moved = affine_transform(moving, affine)
+    return mse_loss(moved, static)
+end
+
+# Get gradients for each parameter
+dt = zero(translation)
+dr = zero(rotation)
+dz = zero(zoom)
+ds = zero(shear)
+
+Enzyme.autodiff(Reverse, loss_fn, Active,
+    Duplicated(translation, dt),
+    Duplicated(rotation, dr),
+    Duplicated(zoom, dz),
+    Duplicated(shear, ds),
+    Const(moving),
+    Const(static)
+)
+```
+
+### Mooncake.jl Fallback Pattern
+```julia
+using Mooncake
+
+# If Enzyme doesn't work, try Mooncake
+rule = Mooncake.build_rrule(loss_fn, params, moving, static)
+loss, (_, dparams, _, _) = Mooncake.value_and_pullback!!(rule, 1.0, loss_fn, params, moving, static)
 ```
 
 ### Mutable State
 - Enzyme works best with immutable data
 - If using mutable structs, may need `Duplicated` wrapper
+- Consider using immutable parameter tuples for optimization
 
 ## Optimisers.jl Usage
 

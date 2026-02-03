@@ -1,7 +1,13 @@
 # Utility functions for MedicalImageRegistration.jl
 
 using LinearAlgebra
-using Zygote: ignore_derivatives
+
+# Helper function to avoid recomputation of constant values in gradient computation
+# This replaces Zygote's ignore_derivatives - in manual gradient computation,
+# these values are naturally constants that don't require gradients
+@inline function _constant(f::Function)
+    return f()
+end
 
 """
     create_identity_grid(spatial_size::NTuple{2, Int}, ::Type{T}=Float32) where T
@@ -76,7 +82,7 @@ function affine_grid(theta::AbstractArray{T, 3}, spatial_size::NTuple{2, Int}) w
 
     # Create identity grid: (2, X, Y)
     # Use ignore_derivatives since grid creation doesn't depend on theta
-    id_grid = ignore_derivatives() do
+    id_grid = _constant() do
         create_identity_grid(spatial_size, T)
     end
 
@@ -85,7 +91,7 @@ function affine_grid(theta::AbstractArray{T, 3}, spatial_size::NTuple{2, Int}) w
     flat_grid = reshape(id_grid, ndim, num_points)
 
     # Add homogeneous coordinate: (3, X*Y)
-    ones_row = ignore_derivatives() do
+    ones_row = _constant() do
         ones(T, 1, num_points)
     end
     homogeneous_grid = vcat(flat_grid, ones_row)
@@ -129,7 +135,7 @@ function affine_grid(theta::AbstractArray{T, 3}, spatial_size::NTuple{3, Int}) w
 
     # Create identity grid: (3, X, Y, Z)
     # Use ignore_derivatives since grid creation doesn't depend on theta
-    id_grid = ignore_derivatives() do
+    id_grid = _constant() do
         create_identity_grid(spatial_size, T)
     end
 
@@ -138,7 +144,7 @@ function affine_grid(theta::AbstractArray{T, 3}, spatial_size::NTuple{3, Int}) w
     flat_grid = reshape(id_grid, ndim, num_points)
 
     # Add homogeneous coordinate: (4, X*Y*Z)
-    ones_row = ignore_derivatives() do
+    ones_row = _constant() do
         ones(T, 1, num_points)
     end
     homogeneous_grid = vcat(flat_grid, ones_row)

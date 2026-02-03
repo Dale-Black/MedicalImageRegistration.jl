@@ -7,7 +7,7 @@ A minimal Julia library for 2D and 3D medical image registration, inspired by [t
 - **Affine Registration**: Translation, rotation, zoom, and shear optimization
 - **SyN Registration**: Symmetric diffeomorphic (deformable) registration
 - **Multiresolution**: Coarse-to-fine optimization for speed and robustness
-- **Cross-platform GPU**: Works on CUDA, Metal (Apple Silicon), ROCm, and CPU via AcceleratedKernels.jl
+- **2D and 3D**: Full support for both image dimensions
 - **Automatic Differentiation**: Enzyme.jl integration for gradients
 
 ## Installation
@@ -53,7 +53,7 @@ moved_xy, moved_yx, flow_xy, flow_yx = register(moving, static, reg)
 ```julia
 reg = AffineRegistration(;
     ndims=3,
-    loss_fn=dice_loss,
+    dissimilarity_fn=dice_loss,
     optimizer=Optimisers.Adam(1e-2)
 )
 ```
@@ -70,7 +70,6 @@ Julia uses column-major order. This package follows Julia conventions:
 
 ## Dependencies
 
-- [AcceleratedKernels.jl](https://github.com/JuliaGPU/AcceleratedKernels.jl) - Cross-platform GPU kernels
 - [NNlib.jl](https://github.com/FluxML/NNlib.jl) - `grid_sample` for spatial transforms
 - [Enzyme.jl](https://github.com/EnzymeAD/Enzyme.jl) - Automatic differentiation
 - [Optimisers.jl](https://github.com/FluxML/Optimisers.jl) - Optimization algorithms

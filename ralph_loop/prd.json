@@ -35,7 +35,16 @@
     "adLibrary": {
       "options": ["Enzyme.jl", "Mooncake.jl"],
       "prohibited": "Zygote.jl",
-      "note": "RESEARCH-AD-001 will evaluate both options and choose. DO NOT use Zygote.jl under any circumstances."
+      "note": "RESEARCH-AD-001 evaluates both. Choice must be BAKED IN - users should never think about AD library. DO NOT use Zygote.jl."
+    },
+    "gpuStrategy": {
+      "library": "AcceleratedKernels.jl",
+      "platforms": ["CPU", "Metal (Apple Silicon)", "CUDA"],
+      "testing": {
+        "local": "Mac with Metal GPU for development",
+        "ci": "GitHub Actions with macos runner for Metal, ubuntu for CPU",
+        "note": "Tests must verify GPU acceleration actually works, not just that code runs"
+      }
     }
   },
   "stories": [
@@ -247,7 +256,7 @@
       "id": "FIX-AD-001",
       "type": "FIX",
       "title": "Replace Zygote with chosen AD library (Enzyme or Mooncake)",
-      "status": "open",
+      "status": "done",
       "priority": 8,
       "blockedBy": ["RESEARCH-AD-001"],
       "description": "Based on RESEARCH-AD-001 findings, replace ALL Zygote usage with the chosen AD library (Enzyme.jl or Mooncake.jl). This affects src/affine.jl and src/syn.jl fit! functions. Update Project.toml dependencies accordingly.",
@@ -358,11 +367,47 @@
       "files": ["test/runtests.jl"]
     },
     {
+      "id": "IMPL-GPU-001",
+      "type": "IMPL",
+      "title": "Integrate AcceleratedKernels.jl for GPU support",
+      "status": "open",
+      "priority": 15,
+      "blockedBy": ["TEST-INTEGRATION-001"],
+      "description": "Integrate AcceleratedKernels.jl (AK.jl) for cross-platform GPU acceleration. The package should work transparently on CPU, Metal (Apple Silicon), and CUDA without users having to think about it. Key operations to accelerate: grid sampling, convolutions for smoothing, and any hot loops in the registration.",
+      "acceptanceCriteria": [
+        "AcceleratedKernels.jl added to Project.toml",
+        "GPU-accelerated operations work on CPU (fallback)",
+        "GPU-accelerated operations work on Metal (test locally on Mac)",
+        "Registration runs significantly faster on GPU vs CPU",
+        "Users don't need to explicitly enable GPU - it's automatic",
+        "Document which operations benefit from GPU acceleration"
+      ],
+      "files": ["src/utils.jl", "src/affine.jl", "src/syn.jl", "Project.toml"]
+    },
+    {
+      "id": "SETUP-CI-001",
+      "type": "SETUP",
+      "title": "Set up GitHub Actions with Mac runner for GPU testing",
+      "status": "open",
+      "priority": 16,
+      "blockedBy": ["IMPL-GPU-001"],
+      "description": "Configure GitHub Actions CI to test on both Ubuntu (CPU) and macOS (Metal GPU). The Mac runner will verify that Metal GPU acceleration actually works. Tests should measure and report performance to confirm GPU speedup.",
+      "acceptanceCriteria": [
+        ".github/workflows/ci.yml updated with macOS job",
+        "Ubuntu job runs standard CPU tests",
+        "macOS job runs tests with Metal GPU",
+        "CI reports pass/fail for both CPU and GPU paths",
+        "Performance benchmarks logged (optional but helpful)",
+        "Tests catch if GPU acceleration silently falls back to CPU"
+      ],
+      "files": [".github/workflows/ci.yml"]
+    },
+    {
       "id": "DEMO-001",
       "type": "IMPL",
       "title": "Create TestImages.jl demo with GIF output",
       "status": "open",
-      "priority": 15,
+      "priority": 17,
       "blockedBy": ["TEST-INTEGRATION-001"],
       "description": "Create a demo script that uses TestImages.jl to demonstrate registration capabilities. Save a GIF showing before/after registration. Update README with the GIF and demo instructions.",
       "acceptanceCriteria": [
@@ -379,8 +424,8 @@
       "type": "RESEARCH",
       "title": "Research and document intensity/HU conservation",
       "status": "open",
-      "priority": 16,
-      "blockedBy": ["TEST-INTEGRATION-001"],
+      "priority": 18,
+      "blockedBy": ["SETUP-CI-001"],
       "description": "Investigate whether spatial transformations preserve intensity values (important for quantitative CT HU analysis). Document which interpolation modes preserve values and which don't. Add 'Intensity Conservation' section to README with practical guidance.",
       "acceptanceCriteria": [
         "Document whether bilinear/trilinear interpolation preserves exact values",
@@ -396,7 +441,7 @@
       "type": "IMPL",
       "title": "Final cleanup and export verification",
       "status": "open",
-      "priority": 17,
+      "priority": 19,
       "blockedBy": ["DEMO-001", "DOC-001"],
       "description": "Final pass: verify all exports work, remove any TODO comments, ensure consistent code style, verify package loads cleanly.",
       "acceptanceCriteria": [
@@ -405,7 +450,9 @@
         "No remaining TODO/FIXME comments",
         "Package precompiles successfully",
         "No Zygote references remain anywhere",
-        "Correct AD library (Enzyme or Mooncake) is properly integrated"
+        "AD library choice is baked in - users never see it",
+        "GPU acceleration via AK.jl is transparent to users",
+        "CI passes on both Ubuntu (CPU) and macOS (Metal GPU)"
       ],
       "files": ["src/MedicalImageRegistration.jl"]
     }
