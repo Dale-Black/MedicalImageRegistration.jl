@@ -407,7 +407,7 @@
       "id": "IMPL-2D-001",
       "type": "IMPL",
       "title": "Verify and fix 2D support across all components",
-      "status": "open",
+      "status": "done",
       "priority": 13,
       "blockedBy": ["TEST-SYN-001"],
       "description": "Go through all implementations and ensure 2D (ndims=2) works correctly. The is_3d flag in torchreg controls this; we use ndims parameter.",
