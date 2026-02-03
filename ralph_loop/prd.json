@@ -7,7 +7,8 @@
       "RESEARCH": "Deep-dive study with documentation. Read source files, understand algorithms, document findings in progress.md",
       "SETUP": "Create infrastructure (files, configs, test harnesses). Verify with basic smoke tests",
       "IMPL": "Implement feature following Julia idioms. Must pass type checks and basic tests",
-      "TEST": "Write parity tests comparing Julia vs torchreg via PythonCall. All tests must pass"
+      "TEST": "Write parity tests comparing Julia vs torchreg via PythonCall. All tests must pass",
+      "FIX": "Fix issues discovered during implementation or testing"
     },
     "workflowRules": [
       "Pick lowest-priority OPEN story where all blockedBy are DONE",
@@ -30,6 +31,11 @@
         "constants": "SCREAMING_SNAKE_CASE"
       },
       "style": "Use multiple dispatch, keyword arguments, type annotations where helpful"
+    },
+    "adLibrary": {
+      "options": ["Enzyme.jl", "Mooncake.jl"],
+      "prohibited": "Zygote.jl",
+      "note": "RESEARCH-AD-001 will evaluate both options and choose. DO NOT use Zygote.jl under any circumstances."
     }
   },
   "stories": [
@@ -219,98 +225,66 @@
       "files": ["test/test_metrics.jl"]
     },
     {
-      "id": "IMPL-AFFINE-001",
-      "type": "IMPL",
-      "title": "Implement AffineRegistration struct and types",
+      "id": "RESEARCH-AD-001",
+      "type": "RESEARCH",
+      "title": "Evaluate Enzyme.jl vs Mooncake.jl for AD",
       "status": "done",
       "priority": 7,
       "blockedBy": ["TEST-METRICS-001"],
-      "description": "Implement AffineRegistration mutable struct in src/types.jl and src/affine.jl. Store all configuration: scales, iterations, learning_rate, loss function, optimizer, parameter flags, interpolation settings.",
+      "description": "Research and compare Enzyme.jl and Mooncake.jl to determine which is better suited for this project. Test both with a minimal example that includes: (1) NNlib.grid_sample differentiation, (2) batched matrix operations, (3) nested function calls. Document findings and make a recommendation.",
       "acceptanceCriteria": [
-        "AffineRegistration struct with all config fields",
-        "Constructor with sensible defaults matching torchreg",
-        "Supports both 2D (ndims=2) and 3D (ndims=3)",
-        "Stores learned parameters after registration"
+        "progress.md documents Enzyme.jl API and how to compute gradients",
+        "progress.md documents Mooncake.jl API and how to compute gradients",
+        "Test both with NNlib.grid_sample - does differentiation work?",
+        "Test both with compose_affine-like batched operations",
+        "Document any limitations or gotchas for each",
+        "Make clear recommendation with justification",
+        "Include working code snippets for the chosen library"
       ],
-      "files": ["src/types.jl", "src/affine.jl"],
-      "torchregRef": "affine.py:AffineRegistration.__init__ (line 7-25)"
+      "files": []
     },
     {
-      "id": "IMPL-AFFINE-002",
-      "type": "IMPL",
-      "title": "Implement init_parameters and compose_affine",
-      "status": "done",
-      "priority": 7,
-      "blockedBy": ["IMPL-AFFINE-001"],
-      "description": "Implement init_parameters() to create translation, rotation, zoom, shear parameters. Implement compose_affine() to build affine matrix from these components.",
-      "acceptanceCriteria": [
-        "init_parameters creates correct shapes for 2D and 3D",
-        "compose_affine builds [n_dim, n_dim+1] affine matrix",
-        "Identity parameters produce identity affine",
-        "Handles batch dimension"
-      ],
-      "files": ["src/affine.jl"],
-      "torchregRef": "affine.py:init_parameters (line 68-78), compose_affine (line 81-90)"
-    },
-    {
-      "id": "IMPL-AFFINE-003",
-      "type": "IMPL",
-      "title": "Implement affine_transform using grid_sample",
-      "status": "done",
-      "priority": 7,
-      "blockedBy": ["IMPL-AFFINE-002"],
-      "description": "Implement affine_transform(x, affine, shape) that applies affine transformation using affine_grid + NNlib.grid_sample.",
-      "acceptanceCriteria": [
-        "affine_transform works for 2D and 3D",
-        "Supports bilinear/trilinear interpolation",
-        "Handles padding modes (border, zeros, reflection)",
-        "Output shape can differ from input shape"
-      ],
-      "files": ["src/affine.jl"],
-      "torchregRef": "affine.py:affine_transform (line 61-65)"
-    },
-    {
-      "id": "IMPL-AFFINE-004",
-      "type": "IMPL",
-      "title": "Implement affine registration fit loop with Enzyme",
-      "status": "done",
+      "id": "FIX-AD-001",
+      "type": "FIX",
+      "title": "Replace Zygote with chosen AD library (Enzyme or Mooncake)",
+      "status": "open",
       "priority": 8,
-      "blockedBy": ["IMPL-AFFINE-003"],
-      "description": "Implement the optimization loop that minimizes dissimilarity. Use Enzyme.jl for gradients and Optimisers.jl for parameter updates. Handle multiresolution pyramid.",
+      "blockedBy": ["RESEARCH-AD-001"],
+      "description": "Based on RESEARCH-AD-001 findings, replace ALL Zygote usage with the chosen AD library (Enzyme.jl or Mooncake.jl). This affects src/affine.jl and src/syn.jl fit! functions. Update Project.toml dependencies accordingly.",
       "acceptanceCriteria": [
-        "Optimization loop converges on test case",
-        "Enzyme computes gradients correctly",
-        "Multiresolution (scales) works",
-        "Progress can be optionally displayed"
+        "No imports of Zygote anywhere in src/",
+        "Chosen AD library used for all gradient computations",
+        "src/MedicalImageRegistration.jl updated to use correct AD library",
+        "Project.toml updated with correct AD dependency (not Zygote)",
+        "fit! functions in affine.jl and syn.jl use new AD gradients",
+        "Basic registration still converges after AD change",
+        "Tests still pass"
       ],
-      "files": ["src/affine.jl"],
-      "torchregRef": "affine.py:_fit (line 40-50)"
+      "files": ["src/MedicalImageRegistration.jl", "src/affine.jl", "src/syn.jl", "Project.toml"]
     },
     {
-      "id": "IMPL-AFFINE-005",
+      "id": "IMPL-AFFINE-001",
       "type": "IMPL",
-      "title": "Implement register and transform API",
-      "status": "done",
-      "priority": 8,
-      "blockedBy": ["IMPL-AFFINE-004"],
-      "description": "Implement the main API: register(moving, static, reg::AffineRegistration), transform(image, reg), get_affine(reg). These are the user-facing functions.",
+      "title": "Verify AffineRegistration works with new AD library",
+      "status": "open",
+      "priority": 9,
+      "blockedBy": ["FIX-AD-001"],
+      "description": "After fixing AD, verify that AffineRegistration struct works correctly with the new AD library. May need to adjust how parameters are stored/passed for compatibility.",
       "acceptanceCriteria": [
-        "register() runs full registration and returns moved image",
-        "transform() applies learned transform to new images",
-        "get_affine() returns the affine matrix",
-        "API is clean and Julian"
+        "AffineRegistration struct works with chosen AD library",
+        "Parameters can be differentiated correctly",
+        "No runtime errors during gradient computation"
       ],
-      "files": ["src/affine.jl"],
-      "torchregRef": "affine.py:__call__ (line 27-38), transform (line 52-54), get_affine (line 56-58)"
+      "files": ["src/types.jl", "src/affine.jl"]
     },
     {
       "id": "TEST-AFFINE-001",
       "type": "TEST",
-      "title": "Parity tests for AffineRegistration",
-      "status": "done",
-      "priority": 9,
-      "blockedBy": ["IMPL-AFFINE-005"],
-      "description": "Write comprehensive parity tests for AffineRegistration. Test: (1) compose_affine produces same matrix as torchreg, (2) affine_transform produces same output, (3) Full registration on synthetic data converges similarly.",
+      "title": "Parity tests for AffineRegistration with new AD",
+      "status": "open",
+      "priority": 10,
+      "blockedBy": ["IMPL-AFFINE-001"],
+      "description": "Verify that AffineRegistration still produces correct results after AD library migration. Test: (1) compose_affine produces same matrix as torchreg, (2) affine_transform produces same output, (3) Full registration on synthetic data converges similarly.",
       "acceptanceCriteria": [
         "compose_affine matches torchreg within rtol=1e-5",
         "affine_transform matches within rtol=1e-4",
@@ -322,79 +296,27 @@
     {
       "id": "IMPL-SYN-001",
       "type": "IMPL",
-      "title": "Implement SyN diffeomorphic transform base",
-      "status": "done",
-      "priority": 10,
+      "title": "Verify SyN registration with new AD library",
+      "status": "open",
+      "priority": 11,
       "blockedBy": ["TEST-AFFINE-001"],
-      "description": "Implement the core diffeomorphic operations: diffeomorphic_transform (scaling-and-squaring), spatial_transform, composition_transform. These form the basis of SyN.",
+      "description": "After AD migration, verify SyN registration works correctly. The diffeomorphic operations (scaling-and-squaring) must be differentiable through the chosen AD library.",
       "acceptanceCriteria": [
-        "diffeomorphic_transform implements scaling-and-squaring",
-        "spatial_transform warps images by velocity field",
-        "composition_transform composes two velocity fields",
-        "time_steps parameter controls integration accuracy"
+        "SyN fit! function works with new AD gradients",
+        "diffeomorphic_transform is differentiable",
+        "Registration produces reasonable output (not NaN/Inf)",
+        "Basic convergence test passes"
       ],
-      "files": ["src/syn.jl"],
-      "torchregRef": "syn.py:SyNBase (line 11-40)"
-    },
-    {
-      "id": "IMPL-SYN-002",
-      "type": "IMPL",
-      "title": "Implement apply_flows and Gaussian smoothing",
-      "status": "done",
-      "priority": 10,
-      "blockedBy": ["IMPL-SYN-001"],
-      "description": "Implement apply_flows() that applies forward and inverse flows to images. Implement gauss_smoothing() for flow regularization during optimization.",
-      "acceptanceCriteria": [
-        "apply_flows returns half and full transformed images",
-        "apply_flows returns corresponding flow fields",
-        "gauss_smoothing produces smoothed velocity fields",
-        "All operations preserve differentiability"
-      ],
-      "files": ["src/syn.jl"],
-      "torchregRef": "syn.py:apply_flows (line 16-26), gauss_smoothing (line 113-119)"
-    },
-    {
-      "id": "IMPL-SYN-003",
-      "type": "IMPL",
-      "title": "Implement SyNRegistration struct and fit loop",
-      "status": "done",
-      "priority": 11,
-      "blockedBy": ["IMPL-SYN-002"],
-      "description": "Implement SyNRegistration struct with all config (scales, iterations, regularization, etc). Implement the fit loop that optimizes velocity fields v_xy and v_yx.",
-      "acceptanceCriteria": [
-        "SyNRegistration struct with all parameters",
-        "fit() optimizes bidirectional velocity fields",
-        "Combines dissimilarity + regularization loss",
-        "Multiresolution pyramid works"
-      ],
-      "files": ["src/syn.jl"],
-      "torchregRef": "syn.py:SyNRegistration (line 43-110)"
-    },
-    {
-      "id": "IMPL-SYN-004",
-      "type": "IMPL",
-      "title": "Implement SyN register API",
-      "status": "done",
-      "priority": 11,
-      "blockedBy": ["IMPL-SYN-003"],
-      "description": "Implement register(moving, static, reg::SyNRegistration) that returns moved images and flow fields in both directions.",
-      "acceptanceCriteria": [
-        "Returns (moved_xy, moved_yx, flow_xy, flow_yx)",
-        "Flows have correct shape for Julia conventions",
-        "Can initialize with pre-computed velocity fields",
-        "API is consistent with AffineRegistration"
-      ],
-      "files": ["src/syn.jl"],
-      "torchregRef": "syn.py:__call__ (line 62-83)"
+      "files": ["src/syn.jl"]
     },
     {
       "id": "TEST-SYN-001",
       "type": "TEST",
-      "title": "Parity tests for SyNRegistration",
-      "status": "done",
+      "title": "Parity tests for SyNRegistration with new AD",
+      "status": "open",
       "priority": 12,
-      "blockedBy": ["IMPL-SYN-004"],
-      "description": "Write parity tests for SyN registration. Note: torchreg's SyN tests are TODO, so focus on: (1) diffeomorphic_transform matches, (2) gauss_smoothing matches, (3) Basic registration converges.",
+      "blockedBy": ["IMPL-SYN-001"],
+      "description": "Verify SyN registration parity after AD migration. Test: diffeomorphic_transform, gauss_smoothing, basic registration convergence.",
       "acceptanceCriteria": [
         "diffeomorphic_transform matches torchreg within rtol=1e-4",
         "gauss_smoothing matches within rtol=1e-5",
@@ -406,24 +328,24 @@
     {
       "id": "IMPL-2D-001",
       "type": "IMPL",
-      "title": "Verify and fix 2D support across all components",
-      "status": "done",
+      "title": "Verify 2D support with new AD library",
+      "status": "open",
       "priority": 13,
       "blockedBy": ["TEST-SYN-001"],
-      "description": "Go through all implementations and ensure 2D (ndims=2) works correctly. The is_3d flag in torchreg controls this; we use ndims parameter.",
+      "description": "Verify that all 2D functionality works correctly with the new AD library. Both AffineRegistration and (optionally) SyN should work with 2D arrays.",
       "acceptanceCriteria": [
         "AffineRegistration works with 2D arrays (X, Y, C, N)",
         "All metrics work with 2D",
-        "SyN works with 2D (note: torchreg SyN is 3D-only currently)",
+        "2D registration converges correctly",
         "Tests pass for both 2D and 3D"
       ],
-      "files": ["src/affine.jl", "src/syn.jl", "src/metrics.jl", "src/utils.jl"]
+      "files": ["src/affine.jl", "src/syn.jl", "test/"]
     },
     {
       "id": "TEST-INTEGRATION-001",
       "type": "TEST",
       "title": "End-to-end integration tests",
-      "status": "done",
+      "status": "open",
       "priority": 14,
       "blockedBy": ["IMPL-2D-001"],
       "description": "Write integration tests that exercise the full registration pipeline: load images, register, verify output quality. Include synthetic test cases with known ground truth.",
@@ -436,18 +358,54 @@
       "files": ["test/runtests.jl"]
     },
     {
+      "id": "DEMO-001",
+      "type": "IMPL",
+      "title": "Create TestImages.jl demo with GIF output",
+      "status": "open",
+      "priority": 15,
+      "blockedBy": ["TEST-INTEGRATION-001"],
+      "description": "Create a demo script that uses TestImages.jl to demonstrate registration capabilities. Save a GIF showing before/after registration. Update README with the GIF and demo instructions.",
+      "acceptanceCriteria": [
+        "Demo script in examples/ directory",
+        "Uses TestImages.jl for standard test images",
+        "Produces a GIF showing registration animation",
+        "README updated to include the demo GIF",
+        "Demo works for 2D affine registration"
+      ],
+      "files": ["examples/demo.jl", "README.md"]
+    },
+    {
+      "id": "DOC-001",
+      "type": "RESEARCH",
+      "title": "Research and document intensity/HU conservation",
+      "status": "open",
+      "priority": 16,
+      "blockedBy": ["TEST-INTEGRATION-001"],
+      "description": "Investigate whether spatial transformations preserve intensity values (important for quantitative CT HU analysis). Document which interpolation modes preserve values and which don't. Add 'Intensity Conservation' section to README with practical guidance.",
+      "acceptanceCriteria": [
+        "Document whether bilinear/trilinear interpolation preserves exact values",
+        "Explain trade-offs between nearest-neighbor vs linear interpolation",
+        "Document which parts of the pipeline affect intensity values",
+        "Add 'Intensity Conservation' section to README",
+        "Provide guidance for users who need quantitative analysis"
+      ],
+      "files": ["README.md"]
+    },
+    {
       "id": "CLEANUP-001",
       "type": "IMPL",
       "title": "Final cleanup and export verification",
-      "status": "done",
-      "priority": 15,
-      "blockedBy": ["TEST-INTEGRATION-001"],
+      "status": "open",
+      "priority": 17,
+      "blockedBy": ["DEMO-001", "DOC-001"],
       "description": "Final pass: verify all exports work, remove any TODO comments, ensure consistent code style, verify package loads cleanly.",
       "acceptanceCriteria": [
         "using MedicalImageRegistration loads without warnings",
         "All exported functions are documented with docstrings",
         "No remaining TODO/FIXME comments",
-        "Package precompiles successfully"
+        "Package precompiles successfully",
+        "No Zygote references remain anywhere",
+        "Correct AD library (Enzyme or Mooncake) is properly integrated"
       ],
       "files": ["src/MedicalImageRegistration.jl"]
     }
