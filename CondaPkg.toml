@@ -1,0 +1,11 @@
+# CondaPkg dependencies for MedicalImageRegistration.jl
+# Required for parity testing with torchreg
+
+[deps]
+python = ">=3.9,<3.12"
+
+[pip.deps]
+torch = ">=2.0"
+numpy = ">=1.20"
+# torchreg needs to be installed manually from /Users/daleblack/Documents/dev/torchreg_temp
+# Run: pip install -e /Users/daleblack/Documents/dev/torchreg_temp

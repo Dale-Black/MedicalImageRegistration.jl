@@ -891,6 +891,95 @@ The package now includes Zygote as a dependency.
 
 ---
 
+## [IMPL-UTILS-001] Implement affine_grid function
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+### Implementation Summary
+
+Implemented `affine_grid` in `src/utils.jl` for creating sampling grids from affine transformations.
+
+#### Functions Implemented
+
+1. **`create_identity_grid(spatial_size, T)`**
+   - 2D: Returns `(2, X, Y)` grid with normalized [-1, 1] coordinates
+   - 3D: Returns `(3, X, Y, Z)` grid with normalized [-1, 1] coordinates
+   - Efficient loop-based implementation with `@inbounds`
+
+2. **`affine_grid(theta, spatial_size)`**
+   - 2D: Takes `(2, 3, N)` theta, returns `(2, X, Y, N)` grid
+   - 3D: Takes `(3, 4, N)` theta, returns `(3, X, Y, Z, N)` grid
+   - Uses homogeneous coordinates for transformation
+   - Batched operation support
+
+3. **`identity_affine(ndim, batch_size, T)`**
+   - Creates identity transformation matrices
+   - Useful for testing and initialization
+
+#### Test Results
+
+All 36 tests passing covering identity grid, identity affine, translation, and scaling.
+
+### Acceptance Criteria Verification
+
+- ✅ affine_grid works for 2D: spatial_size=(X, Y)
+- ✅ affine_grid works for 3D: spatial_size=(X, Y, Z)
+- ✅ Identity affine produces normalized grid from -1 to 1
+- ✅ Function is type-stable (returns Array{Float32, N})
+
+---
+
+## [SETUP-001] Set up test harness with PythonCall.jl
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+### Implementation Summary
+
+Implemented test utilities in `test/test_utils.jl` for parity testing between Julia and torchreg:
+
+#### Key Functions
+
+1. **`julia_to_torch(arr)`** - Converts Julia arrays to PyTorch tensors
+   - 2D: `(X, Y, C, N)` → `(N, C, Y, X)` via `permutedims(arr, (4, 3, 2, 1))`
+   - 3D: `(X, Y, Z, C, N)` → `(N, C, Z, Y, X)` via `permutedims(arr, (5, 4, 3, 2, 1))`
+   - Uses `np.ascontiguousarray()` to ensure proper C-order memory layout
+
+2. **`torch_to_julia(tensor)`** - Converts PyTorch tensors to Julia arrays
+   - 4D: `(N, C, Y, X)` → `(X, Y, C, N)`
+   - 5D: `(N, C, Z, Y, X)` → `(X, Y, Z, C, N)`
+
+3. **`compare_results(julia_result, torch_result; rtol, atol)`**
+   - Handles both array and scalar comparisons
+   - Automatically converts torch tensors before comparison
+   - Default tolerances: `rtol=1e-5`, `atol=1e-8`
+
+#### Test Results
+
+All 13 tests passing:
+- 2D arrays (4D tensors) - shape verification and round-trip
+- 3D arrays (5D tensors) - shape verification and round-trip
+- compare_results helper - tolerance testing
+- Round-trip preservation for various shapes
+
+#### Technical Notes
+
+- **OpenMP conflict**: Set `KMP_DUPLICATE_LIB_OK=TRUE` to work around libomp conflict between Julia and PyTorch
+- **PythonCall**: Uses lazy initialization via `Ref{Py}()` for torch and numpy imports
+- **Memory layout**: Critical to use `np.ascontiguousarray()` to handle Julia's column-major to C's row-major conversion
+
+### Acceptance Criteria Verification
+
+- ✅ julia_to_torch correctly permutes (X,Y,Z,C,N) -> (N,C,Z,Y,X)
+- ✅ torch_to_julia correctly permutes (N,C,Z,Y,X) -> (X,Y,Z,C,N)
+- ✅ compare_results handles both 2D and 3D arrays
+- ✅ Round-trip test passes: arr ≈ torch_to_julia(julia_to_torch(arr))
+
+---
+
 ## [RESEARCH-002] Completion Notes
 
 **Date**: 2026-02-03
