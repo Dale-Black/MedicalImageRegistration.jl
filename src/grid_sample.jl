@@ -1,13 +1,24 @@
-# Pure Julia implementation of grid_sample
+# Pure Julia implementation of grid_sample with GPU acceleration
 #
 # This implementation is designed to:
 # 1. Match PyTorch F.grid_sample output exactly (within rtol=1e-5)
-# 2. Be fully differentiable with Mooncake AD (pure Julia, no threading)
+# 2. Be fully differentiable with Mooncake AD (pure Julia, sequential loops on CPU)
 # 3. Support bilinear (2D) and trilinear (3D) interpolation
 # 4. Support padding_mode :zeros and :border
+# 5. Use AcceleratedKernels.jl for GPU acceleration (CUDA, Metal, ROCm)
 #
-# Unlike NNlib.grid_sample which uses internal threading that breaks Julia AD systems,
-# this implementation is purely sequential and compatible with all AD frameworks.
+# Parallelization strategy:
+# - CPU: Uses sequential loops for Mooncake AD compatibility
+#   (AK.foreachindex on CPU uses Task spawning which breaks Mooncake)
+# - GPU: Uses AK.foreachindex which dispatches to efficient GPU kernels
+#   (no Task spawning on GPU backends)
+
+import AcceleratedKernels as AK
+import GPUArraysCore: AbstractGPUArray
+
+# Dispatch helper: returns true for GPU arrays, false for CPU arrays
+_is_gpu_array(::AbstractArray) = false
+_is_gpu_array(::AbstractGPUArray) = true
 
 """
     grid_sample(input::AbstractArray{T, 4}, grid::AbstractArray{T, 4};
@@ -26,7 +37,8 @@ Sample from a 2D input using a sampling grid (bilinear interpolation).
 # Notes
 - Grid coordinates are in normalized [-1, 1] range (align_corners=true semantics)
 - Uses bilinear interpolation
-- This is a pure Julia implementation compatible with Mooncake AD
+- CPU: Sequential loops compatible with Mooncake AD
+- GPU: AcceleratedKernels.jl for parallel execution
 """
 function grid_sample(input::AbstractArray{T, 4}, grid::AbstractArray{T, 4};
                      padding_mode::Symbol=:zeros) where T
@@ -37,9 +49,22 @@ function grid_sample(input::AbstractArray{T, 4}, grid::AbstractArray{T, 4};
     @assert N_grid == N "Grid batch size ($N_grid) must match input batch size ($N)"
     @assert padding_mode in (:zeros, :border) "padding_mode must be :zeros or :border, got $padding_mode"
 
-    output = zeros(T, X_out, Y_out, C, N)
+    output = similar(input, T, X_out, Y_out, C, N)
+    fill!(output, zero(T))
 
-    # Process each batch and output position
+    if _is_gpu_array(input)
+        # GPU path: Use AK.foreachindex for parallel GPU execution
+        _grid_sample_2d_gpu!(output, input, grid, X_in, Y_in, C, N, X_out, Y_out, padding_mode)
+    else
+        # CPU path: Sequential loops for Mooncake AD compatibility
+        _grid_sample_2d_cpu!(output, input, grid, X_in, Y_in, C, N, X_out, Y_out, padding_mode)
+    end
+
+    return output
+end
+
+# CPU implementation: sequential loops for AD compatibility
+function _grid_sample_2d_cpu!(output, input::AbstractArray{T}, grid, X_in, Y_in, C, N, X_out, Y_out, padding_mode) where T
     @inbounds for n in 1:N
         for j_out in 1:Y_out
             for i_out in 1:X_out
@@ -48,11 +73,10 @@ function grid_sample(input::AbstractArray{T, 4}, grid::AbstractArray{T, 4};
                 y_norm = grid[2, i_out, j_out, n]
 
                 # Convert from normalized [-1, 1] to pixel coordinates [1, size]
-                # align_corners=true: -1 maps to 1, +1 maps to size
                 x = (x_norm + one(T)) * T(0.5) * T(X_in - 1) + one(T)
                 y = (y_norm + one(T)) * T(0.5) * T(Y_in - 1) + one(T)
 
-                # Bilinear interpolation
+                # Bilinear interpolation indices
                 x0 = floor(Int, x)
                 y0 = floor(Int, y)
                 x1 = x0 + 1
@@ -64,14 +88,12 @@ function grid_sample(input::AbstractArray{T, 4}, grid::AbstractArray{T, 4};
                 wy1 = y - T(y0)
                 wy0 = one(T) - wy1
 
-                # Sample with padding handling
                 for c in 1:C
                     v00 = _sample_2d(input, x0, y0, c, n, X_in, Y_in, padding_mode)
                     v10 = _sample_2d(input, x1, y0, c, n, X_in, Y_in, padding_mode)
                     v01 = _sample_2d(input, x0, y1, c, n, X_in, Y_in, padding_mode)
                     v11 = _sample_2d(input, x1, y1, c, n, X_in, Y_in, padding_mode)
 
-                    # Bilinear combination
                     output[i_out, j_out, c, n] = wx0 * wy0 * v00 +
                                                   wx1 * wy0 * v10 +
                                                   wx0 * wy1 * v01 +
@@ -80,8 +102,48 @@ function grid_sample(input::AbstractArray{T, 4}, grid::AbstractArray{T, 4};
             end
         end
     end
+end
 
-    return output
+# GPU implementation: AK.foreachindex for parallel execution
+function _grid_sample_2d_gpu!(output, input::AbstractArray{T}, grid, X_in, Y_in, C, N, X_out, Y_out, padding_mode) where T
+    AK.foreachindex(output) do idx
+        # Convert linear index to (i_out, j_out, c, n) using column-major order
+        i_out = mod1(idx, X_out)
+        j_out = mod1(div(idx - 1, X_out) + 1, Y_out)
+        c = mod1(div(idx - 1, X_out * Y_out) + 1, C)
+        n = div(idx - 1, X_out * Y_out * C) + 1
+
+        # Get normalized coordinates from grid
+        x_norm = grid[1, i_out, j_out, n]
+        y_norm = grid[2, i_out, j_out, n]
+
+        # Convert from normalized [-1, 1] to pixel coordinates [1, size]
+        x = (x_norm + one(T)) * T(0.5) * T(X_in - 1) + one(T)
+        y = (y_norm + one(T)) * T(0.5) * T(Y_in - 1) + one(T)
+
+        # Bilinear interpolation indices
+        x0 = floor(Int, x)
+        y0 = floor(Int, y)
+        x1 = x0 + 1
+        y1 = y0 + 1
+
+        # Interpolation weights
+        wx1 = x - T(x0)
+        wx0 = one(T) - wx1
+        wy1 = y - T(y0)
+        wy0 = one(T) - wy1
+
+        # Sample and interpolate
+        v00 = _sample_2d(input, x0, y0, c, n, X_in, Y_in, padding_mode)
+        v10 = _sample_2d(input, x1, y0, c, n, X_in, Y_in, padding_mode)
+        v01 = _sample_2d(input, x0, y1, c, n, X_in, Y_in, padding_mode)
+        v11 = _sample_2d(input, x1, y1, c, n, X_in, Y_in, padding_mode)
+
+        @inbounds output[i_out, j_out, c, n] = wx0 * wy0 * v00 +
+                                                wx1 * wy0 * v10 +
+                                                wx0 * wy1 * v01 +
+                                                wx1 * wy1 * v11
+    end
 end
 
 """
@@ -101,7 +163,8 @@ Sample from a 3D input using a sampling grid (trilinear interpolation).
 # Notes
 - Grid coordinates are in normalized [-1, 1] range (align_corners=true semantics)
 - Uses trilinear interpolation
-- This is a pure Julia implementation compatible with Mooncake AD
+- CPU: Sequential loops compatible with Mooncake AD
+- GPU: AcceleratedKernels.jl for parallel execution
 """
 function grid_sample(input::AbstractArray{T, 5}, grid::AbstractArray{T, 5};
                      padding_mode::Symbol=:zeros) where T
@@ -112,9 +175,22 @@ function grid_sample(input::AbstractArray{T, 5}, grid::AbstractArray{T, 5};
     @assert N_grid == N "Grid batch size ($N_grid) must match input batch size ($N)"
     @assert padding_mode in (:zeros, :border) "padding_mode must be :zeros or :border, got $padding_mode"
 
-    output = zeros(T, X_out, Y_out, Z_out, C, N)
+    output = similar(input, T, X_out, Y_out, Z_out, C, N)
+    fill!(output, zero(T))
 
-    # Process each batch and output position
+    if _is_gpu_array(input)
+        # GPU path: Use AK.foreachindex for parallel GPU execution
+        _grid_sample_3d_gpu!(output, input, grid, X_in, Y_in, Z_in, C, N, X_out, Y_out, Z_out, padding_mode)
+    else
+        # CPU path: Sequential loops for Mooncake AD compatibility
+        _grid_sample_3d_cpu!(output, input, grid, X_in, Y_in, Z_in, C, N, X_out, Y_out, Z_out, padding_mode)
+    end
+
+    return output
+end
+
+# CPU implementation: sequential loops for AD compatibility
+function _grid_sample_3d_cpu!(output, input::AbstractArray{T}, grid, X_in, Y_in, Z_in, C, N, X_out, Y_out, Z_out, padding_mode) where T
     @inbounds for n in 1:N
         for k_out in 1:Z_out
             for j_out in 1:Y_out
@@ -125,12 +201,11 @@ function grid_sample(input::AbstractArray{T, 5}, grid::AbstractArray{T, 5};
                     z_norm = grid[3, i_out, j_out, k_out, n]
 
                     # Convert from normalized [-1, 1] to pixel coordinates [1, size]
-                    # align_corners=true: -1 maps to 1, +1 maps to size
                     x = (x_norm + one(T)) * T(0.5) * T(X_in - 1) + one(T)
                     y = (y_norm + one(T)) * T(0.5) * T(Y_in - 1) + one(T)
                     z = (z_norm + one(T)) * T(0.5) * T(Z_in - 1) + one(T)
 
-                    # Trilinear interpolation
+                    # Trilinear interpolation indices
                     x0 = floor(Int, x)
                     y0 = floor(Int, y)
                     z0 = floor(Int, z)
@@ -146,7 +221,6 @@ function grid_sample(input::AbstractArray{T, 5}, grid::AbstractArray{T, 5};
                     wz1 = z - T(z0)
                     wz0 = one(T) - wz1
 
-                    # Sample with padding handling
                     for c in 1:C
                         v000 = _sample_3d(input, x0, y0, z0, c, n, X_in, Y_in, Z_in, padding_mode)
                         v100 = _sample_3d(input, x1, y0, z0, c, n, X_in, Y_in, Z_in, padding_mode)
@@ -157,7 +231,6 @@ function grid_sample(input::AbstractArray{T, 5}, grid::AbstractArray{T, 5};
                         v011 = _sample_3d(input, x0, y1, z1, c, n, X_in, Y_in, Z_in, padding_mode)
                         v111 = _sample_3d(input, x1, y1, z1, c, n, X_in, Y_in, Z_in, padding_mode)
 
-                        # Trilinear combination
                         output[i_out, j_out, k_out, c, n] =
                             wx0 * wy0 * wz0 * v000 +
                             wx1 * wy0 * wz0 * v100 +
@@ -172,8 +245,64 @@ function grid_sample(input::AbstractArray{T, 5}, grid::AbstractArray{T, 5};
             end
         end
     end
+end
 
-    return output
+# GPU implementation: AK.foreachindex for parallel execution
+function _grid_sample_3d_gpu!(output, input::AbstractArray{T}, grid, X_in, Y_in, Z_in, C, N, X_out, Y_out, Z_out, padding_mode) where T
+    AK.foreachindex(output) do idx
+        # Convert linear index to (i_out, j_out, k_out, c, n) using column-major order
+        i_out = mod1(idx, X_out)
+        j_out = mod1(div(idx - 1, X_out) + 1, Y_out)
+        k_out = mod1(div(idx - 1, X_out * Y_out) + 1, Z_out)
+        c = mod1(div(idx - 1, X_out * Y_out * Z_out) + 1, C)
+        n = div(idx - 1, X_out * Y_out * Z_out * C) + 1
+
+        # Get normalized coordinates from grid
+        x_norm = grid[1, i_out, j_out, k_out, n]
+        y_norm = grid[2, i_out, j_out, k_out, n]
+        z_norm = grid[3, i_out, j_out, k_out, n]
+
+        # Convert from normalized [-1, 1] to pixel coordinates [1, size]
+        x = (x_norm + one(T)) * T(0.5) * T(X_in - 1) + one(T)
+        y = (y_norm + one(T)) * T(0.5) * T(Y_in - 1) + one(T)
+        z = (z_norm + one(T)) * T(0.5) * T(Z_in - 1) + one(T)
+
+        # Trilinear interpolation indices
+        x0 = floor(Int, x)
+        y0 = floor(Int, y)
+        z0 = floor(Int, z)
+        x1 = x0 + 1
+        y1 = y0 + 1
+        z1 = z0 + 1
+
+        # Interpolation weights
+        wx1 = x - T(x0)
+        wx0 = one(T) - wx1
+        wy1 = y - T(y0)
+        wy0 = one(T) - wy1
+        wz1 = z - T(z0)
+        wz0 = one(T) - wz1
+
+        # Sample and interpolate
+        v000 = _sample_3d(input, x0, y0, z0, c, n, X_in, Y_in, Z_in, padding_mode)
+        v100 = _sample_3d(input, x1, y0, z0, c, n, X_in, Y_in, Z_in, padding_mode)
+        v010 = _sample_3d(input, x0, y1, z0, c, n, X_in, Y_in, Z_in, padding_mode)
+        v110 = _sample_3d(input, x1, y1, z0, c, n, X_in, Y_in, Z_in, padding_mode)
+        v001 = _sample_3d(input, x0, y0, z1, c, n, X_in, Y_in, Z_in, padding_mode)
+        v101 = _sample_3d(input, x1, y0, z1, c, n, X_in, Y_in, Z_in, padding_mode)
+        v011 = _sample_3d(input, x0, y1, z1, c, n, X_in, Y_in, Z_in, padding_mode)
+        v111 = _sample_3d(input, x1, y1, z1, c, n, X_in, Y_in, Z_in, padding_mode)
+
+        @inbounds output[i_out, j_out, k_out, c, n] =
+            wx0 * wy0 * wz0 * v000 +
+            wx1 * wy0 * wz0 * v100 +
+            wx0 * wy1 * wz0 * v010 +
+            wx1 * wy1 * wz0 * v110 +
+            wx0 * wy0 * wz1 * v001 +
+            wx1 * wy0 * wz1 * v101 +
+            wx0 * wy1 * wz1 * v011 +
+            wx1 * wy1 * wz1 * v111
+    end
 end
 
 # ============================================================================
