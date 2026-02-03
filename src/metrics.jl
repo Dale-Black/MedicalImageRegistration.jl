@@ -68,3 +68,104 @@ loss = dice_loss(x1, x2)
 function dice_loss(x1::AbstractArray{T, N}, x2::AbstractArray{T, N}) where {T, N}
     return one(T) - dice_score(x1, x2)
 end
+
+"""
+    NCC(; kernel_size=7, epsilon_numerator=1e-5, epsilon_denominator=1e-5)
+
+Normalized Cross-Correlation loss function for image registration.
+
+Computes the local windowed cross-correlation between two images using a box kernel.
+Returns negative NCC (for minimization during training).
+
+# Arguments
+- `kernel_size`: Size of the local window for computing correlation (default: 7)
+- `epsilon_numerator`: Small constant added to numerator for numerical stability (default: 1e-5)
+- `epsilon_denominator`: Small constant added to denominator for numerical stability (default: 1e-5)
+
+# Example
+```julia
+ncc = NCC(kernel_size=9)
+pred = rand(Float32, 32, 32, 32, 1, 2)  # 3D batch of 2
+targ = rand(Float32, 32, 32, 32, 1, 2)
+loss = ncc(pred, targ)
+```
+"""
+struct NCC{T}
+    kernel_size::Int
+    eps_nr::T
+    eps_dr::T
+end
+
+function NCC(; kernel_size::Int=7, epsilon_numerator::T=Float32(1e-5), epsilon_denominator::T=Float32(1e-5)) where T
+    return NCC{T}(kernel_size, epsilon_numerator, epsilon_denominator)
+end
+
+"""
+    (ncc::NCC)(pred::AbstractArray, targ::AbstractArray)
+
+Compute NCC loss between prediction and target arrays.
+
+Uses local windowed cross-correlation computed via convolution with a box kernel.
+
+# Arguments
+- `pred`: Predicted image, shape `(X, Y, [Z,] C, N)`
+- `targ`: Target image, same shape as pred
+
+# Returns
+Negative mean NCC (scalar). More negative = better correlation.
+Perfect correlation would approach -1.
+
+# Implementation Details
+- Creates a box kernel (all ones) of size `kernel_size`
+- Computes local sums via convolution
+- Uses variance formula: Var(X) = E[X²] - E[X]²
+- Applies ReLU to variances for numerical stability
+"""
+function (ncc::NCC{T})(pred::AbstractArray{T, N}, targ::AbstractArray{T, N}) where {T, N}
+    # Determine if 2D or 3D
+    is_3d = N == 5
+    ks = ncc.kernel_size
+    pad = ks ÷ 2
+
+    # Get dimensions
+    C = size(targ, N - 1)  # Channel dimension
+    batch_size = size(targ, N)  # Batch dimension
+
+    # Create box kernel: all ones
+    # 2D: (ks, ks, 1, 1) - single channel in, single channel out
+    # 3D: (ks, ks, ks, 1, 1)
+    if is_3d
+        kernel = ones(T, ks, ks, ks, 1, 1)
+    else
+        kernel = ones(T, ks, ks, 1, 1)
+    end
+    n_elements = T(prod(size(kernel)[1:end-2]))  # Number of elements in spatial kernel
+
+    # Compute local sums via convolution
+    # Process each channel separately and sum
+    if is_3d
+        padding = (pad, pad, pad)
+    else
+        padding = (pad, pad)
+    end
+
+    # Compute local statistics for all channels
+    t_sum = NNlib.conv(targ, kernel; pad=padding)
+    p_sum = NNlib.conv(pred, kernel; pad=padding)
+    t2_sum = NNlib.conv(targ .^ 2, kernel; pad=padding)
+    p2_sum = NNlib.conv(pred .^ 2, kernel; pad=padding)
+    tp_sum = NNlib.conv(targ .* pred, kernel; pad=padding)
+
+    # Cross-covariance: E[TP] - E[T]E[P]
+    cross = tp_sum .- t_sum .* p_sum ./ n_elements
+
+    # Variances: E[X²] - E[X]² (use max with 0 for numerical stability)
+    t_var = max.(t2_sum .- t_sum .^ 2 ./ n_elements, zero(T))
+    p_var = max.(p2_sum .- p_sum .^ 2 ./ n_elements, zero(T))
+
+    # NCC: cross² / (var_t * var_p)
+    cc = (cross .^ 2 .+ ncc.eps_nr) ./ (t_var .* p_var .+ ncc.eps_dr)
+
+    # Return negative mean (for minimization)
+    return -mean(cc)
+end

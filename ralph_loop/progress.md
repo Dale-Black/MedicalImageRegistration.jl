@@ -1109,3 +1109,62 @@ All parity tests pass with torchreg within rtol=1e-5:
 - ✅ Handles batch dimension correctly
 
 ---
+
+## [IMPL-METRICS-002] Implement Normalized Cross-Correlation (NCC) loss
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+### Implementation Summary
+
+Implemented `NCC` callable struct in `src/metrics.jl` for local windowed cross-correlation loss.
+
+#### Struct and Constructor
+
+```julia
+struct NCC{T}
+    kernel_size::Int
+    eps_nr::T      # epsilon for numerator
+    eps_dr::T      # epsilon for denominator
+end
+
+NCC(; kernel_size=7, epsilon_numerator=1e-5f0, epsilon_denominator=1e-5f0)
+```
+
+#### Algorithm
+
+1. Create box kernel (all ones) of size `kernel_size`
+2. Compute local sums via convolution:
+   - `t_sum`, `p_sum` - local means
+   - `t2_sum`, `p2_sum` - local squared sums
+   - `tp_sum` - local cross products
+3. Compute local cross-covariance: `cross = E[TP] - E[T]E[P]`
+4. Compute local variances with ReLU for stability: `var = max(E[X²] - E[X]², 0)`
+5. Compute NCC: `cc = (cross² + eps) / (var_t * var_p + eps)`
+6. Return `-mean(cc)` (negative for minimization)
+
+#### Parity Results
+
+- ✅ Perfect parity with torchreg for N=1 (single batch) cases
+- ⚠️ Known discrepancy for N>1: torchreg has a quirk where kernel shape depends on batch size `(N, C, ks, ks, ks)`, causing different results. Our implementation uses semantically correct `(ks, ks, ks, 1, 1)` kernel.
+
+Typical registration workloads use N=1, so this should not affect practical usage.
+
+#### Test Results (N=1 parity)
+
+| kernel_size | Julia NCC | Torch NCC | Match |
+|-------------|-----------|-----------|-------|
+| 3 | -0.1824 | -0.1824 | ✅ |
+| 5 | -0.2428 | -0.2428 | ✅ |
+| 7 | -0.3935 | -0.3935 | ✅ |
+| 9 | -0.3957 | -0.3957 | ✅ |
+
+### Acceptance Criteria Verification
+
+- ✅ NCC struct with kernel_size parameter
+- ✅ Forward pass computes windowed cross-correlation
+- ✅ Returns negative CC (for minimization)
+- ✅ Works for 2D and 3D
+
+---

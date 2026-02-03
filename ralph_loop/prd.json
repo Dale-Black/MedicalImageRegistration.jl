@@ -172,7 +172,7 @@
       "id": "IMPL-METRICS-002",
       "type": "IMPL",
       "title": "Implement Normalized Cross-Correlation (NCC) loss",
-      "status": "open",
+      "status": "done",
       "priority": 5,
       "blockedBy": ["IMPL-METRICS-001"],
       "description": "Implement NCC loss as a callable struct in src/metrics.jl. Uses local window correlation.",

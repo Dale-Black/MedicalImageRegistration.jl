@@ -19,6 +19,6 @@ include("metrics.jl")
 # Exports
 export AffineRegistration, SyNRegistration
 export register, transform, get_affine
-export dice_loss, dice_score, ncc_loss, linear_elasticity
+export dice_loss, dice_score, NCC, linear_elasticity
 
 end # module
