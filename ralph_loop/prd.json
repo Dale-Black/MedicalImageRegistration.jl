@@ -256,7 +256,7 @@
       "id": "IMPL-AFFINE-003",
       "type": "IMPL",
       "title": "Implement affine_transform using grid_sample",
-      "status": "open",
+      "status": "done",
       "priority": 7,
       "blockedBy": ["IMPL-AFFINE-002"],
       "description": "Implement affine_transform(x, affine, shape) that applies affine transformation using affine_grid + NNlib.grid_sample.",

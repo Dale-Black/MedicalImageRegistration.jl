@@ -1206,19 +1206,21 @@ Following torchreg, computes **second-order spatial derivatives** of the displac
 - `mu` (default 2.0): Shear modulus - resistance to shearing
 - `lam` (default 1.0): First Lamé parameter - resistance to compression
 
-#### Known Differences from torchreg
+#### Torchreg Parity
 
-⚠️ **Parity Note**: The Julia implementation differs numerically from torchreg due to:
+✅ **Full parity with torchreg achieved!**
 
-1. Different axis conventions in `jacobi_gradient` output (Julia uses `(component, deriv_dir, X, Y, Z, N)`, torchreg uses `(3, Z, Y, X, 3)`)
-2. Index mapping differences when extracting second derivatives
+The implementation matches torchreg within rtol=1e-4 for all tested cases:
+- Cubic arrays (8×8×8, 16×16×16)
+- Non-cubic arrays (10×12×14, 6×8×10)
+- Different mu/lam parameter combinations
 
-The implementation is **functionally correct** - it computes a reasonable regularization penalty that:
-- Returns finite non-negative values
-- Higher `mu` produces higher penalty
-- Smooth displacement fields have lower penalty
+**Key implementation details for parity**:
 
-Full parity testing deferred to TEST-METRICS-001.
+1. **Array format conversion**: Julia `(X, Y, Z, 3, N)` → torchreg `(N, Z, Y, X, 3)` via permutation
+2. **Identity grid creation**: Must match `F.affine_grid` output format exactly
+3. **Scale factors**: torchreg uses `scale = u.shape[1:4] - 1 = (Z-1, Y-1, X-1)` which broadcasts to components in reverse order (component 0 scaled by Z-1, etc.)
+4. **Boundary handling**: torchreg computes central differences in interior only, then uses replicate padding to fill boundaries
 
 ### Acceptance Criteria Verification
 
@@ -1256,16 +1258,17 @@ Implemented comprehensive parity tests in `test/test_metrics.jl`:
 
 Note: NCC has known batch size > 1 difference due to torchreg kernel shape quirk.
 
-#### LinearElasticity Tests (7 tests)
-- Basic functionality (finite, non-negative)
-- Parameter effect (higher mu/lam → higher penalty)
-- Smooth vs rough fields (smooth has lower penalty)
-- Single batch handling
+#### LinearElasticity Tests (8+ tests)
+- Cubic arrays (8×8×8, 16×16×16)
+- Non-cubic arrays (10×12×14, 6×8×10)
+- Different mu/lam combinations (1.0/1.0, 2.0/1.0, 0.5/2.0, 3.0/0.5)
+- Different random seeds
 
-**Result**: All behavior tests pass ✅
+**Result**: All match torchreg within rtol=1e-4 ✅
 
-Note: Numerical parity with torchreg not verified due to axis convention differences.
-Functional correctness is verified.
+Full numerical parity achieved after fixing:
+- Scale factor broadcasting to match torchreg
+- Boundary handling (replicate pad after central diff, not custom boundary formulas)
 
 ### Acceptance Criteria Verification
 
@@ -1408,5 +1411,62 @@ All tests pass:
 - ✅ compose_affine builds [n_dim, n_dim+1] affine matrix
 - ✅ Identity parameters produce identity affine
 - ✅ Handles batch dimension
+
+---
+
+## [IMPL-AFFINE-003] Implement affine_transform using grid_sample
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+### Implementation Summary
+
+Implemented `affine_transform(x, affine; shape, padding_mode)` in `src/affine.jl` for applying affine transformations to images.
+
+#### Function Signatures
+
+```julia
+# 2D
+affine_transform(x::AbstractArray{T, 4}, affine::AbstractArray{T, 3}; shape=nothing, padding_mode=:border)
+
+# 3D
+affine_transform(x::AbstractArray{T, 5}, affine::AbstractArray{T, 3}; shape=nothing, padding_mode=:border)
+
+# With registration object
+affine_transform(x, affine, reg::AffineRegistration; shape=nothing)
+```
+
+#### Implementation Details
+
+1. Uses `affine_grid(affine, shape)` to create sampling grid from affine matrix
+2. Uses `NNlib.grid_sample(x, grid; padding_mode)` for bilinear/trilinear interpolation
+3. Supports optional output shape resizing
+4. Supports padding modes: `:border`, `:zeros`
+
+#### Array Shapes
+
+| Type | Input | Affine | Output |
+|------|-------|--------|--------|
+| 2D | `(X, Y, C, N)` | `(2, 3, N)` | `(X_out, Y_out, C, N)` |
+| 3D | `(X, Y, Z, C, N)` | `(3, 4, N)` | `(X_out, Y_out, Z_out, C, N)` |
+
+### Test Results
+
+All tests pass:
+- ✅ 3D identity transform preserves image (rtol=1e-4)
+- ✅ 2D identity transform preserves image
+- ✅ Translation shifts image content
+- ✅ Output shape resizing works (16×16×16 → 8×8×8)
+- ✅ Batch processing (N=3)
+- ✅ Border and zeros padding modes
+- ✅ Zoom transform via compose_affine
+
+### Acceptance Criteria Verification
+
+- ✅ affine_transform works for 2D and 3D
+- ✅ Supports bilinear/trilinear interpolation (via NNlib.grid_sample)
+- ✅ Handles padding modes (border, zeros) - Note: reflection not in NNlib
+- ✅ Output shape can differ from input shape
 
 ---

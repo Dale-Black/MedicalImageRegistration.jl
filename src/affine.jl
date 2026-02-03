@@ -423,3 +423,107 @@ function get_affine(reg::AffineRegistration)
     end
     return compose_affine(reg.parameters)
 end
+
+# ============================================================================
+# Affine Transform
+# ============================================================================
+
+"""
+    affine_transform(x, affine; shape=nothing, padding_mode=:border)
+
+Apply an affine transformation to an image using grid sampling.
+
+# Arguments
+- `x`: Input image array
+  - 2D: shape `(X, Y, C, N)` where C=channels, N=batch
+  - 3D: shape `(X, Y, Z, C, N)`
+- `affine`: Affine transformation matrix
+  - 2D: shape `(2, 3, N)`
+  - 3D: shape `(3, 4, N)`
+- `shape`: Optional output spatial shape. If `nothing`, uses input spatial shape.
+  - 2D: `(X_out, Y_out)`
+  - 3D: `(X_out, Y_out, Z_out)`
+- `padding_mode`: How to handle out-of-bounds samples
+  - `:border` (default): Use border pixel values
+  - `:zeros`: Use zeros for out-of-bounds
+
+# Returns
+- Transformed image with same type as input
+  - Shape: `(shape..., C, N)` or same as input if shape not specified
+
+# Example
+```julia
+# Transform 3D image with affine matrix
+x = randn(Float32, 64, 64, 64, 1, 1)  # (X, Y, Z, C, N)
+affine = identity_affine(3, 1)  # Identity transform
+y = affine_transform(x, affine)  # Same as input
+
+# Resize during transform
+y_small = affine_transform(x, affine; shape=(32, 32, 32))
+```
+
+# Notes
+- Uses `affine_grid` to create sampling grid from affine matrix
+- Uses `NNlib.grid_sample` for bilinear/trilinear interpolation
+- Coordinates are in normalized [-1, 1] range
+"""
+function affine_transform(
+    x::AbstractArray{T, 4},  # 2D: (X, Y, C, N)
+    affine::AbstractArray{T, 3};  # (2, 3, N)
+    shape::Union{Nothing, NTuple{2, Int}} = nothing,
+    padding_mode::Symbol = :border
+) where T
+    X, Y, C, N = size(x)
+    @assert size(affine) == (2, 3, N) "Affine shape mismatch: expected (2, 3, $N), got $(size(affine))"
+    @assert padding_mode in (:border, :zeros) "padding_mode must be :border or :zeros"
+
+    # Determine output shape
+    out_shape = shape === nothing ? (X, Y) : shape
+
+    # Create sampling grid from affine transformation
+    grid = affine_grid(affine, out_shape)  # (2, X_out, Y_out, N)
+
+    # Use NNlib.grid_sample for interpolation
+    # NNlib expects grid with coordinates in first dimension
+    result = NNlib.grid_sample(x, grid; padding_mode=padding_mode)
+
+    return result
+end
+
+function affine_transform(
+    x::AbstractArray{T, 5},  # 3D: (X, Y, Z, C, N)
+    affine::AbstractArray{T, 3};  # (3, 4, N)
+    shape::Union{Nothing, NTuple{3, Int}} = nothing,
+    padding_mode::Symbol = :border
+) where T
+    X, Y, Z, C, N = size(x)
+    @assert size(affine) == (3, 4, N) "Affine shape mismatch: expected (3, 4, $N), got $(size(affine))"
+    @assert padding_mode in (:border, :zeros) "padding_mode must be :border or :zeros"
+
+    # Determine output shape
+    out_shape = shape === nothing ? (X, Y, Z) : shape
+
+    # Create sampling grid from affine transformation
+    grid = affine_grid(affine, out_shape)  # (3, X_out, Y_out, Z_out, N)
+
+    # Use NNlib.grid_sample for interpolation
+    result = NNlib.grid_sample(x, grid; padding_mode=padding_mode)
+
+    return result
+end
+
+"""
+    affine_transform(x, affine, reg::AffineRegistration; shape=nothing)
+
+Apply affine transformation using settings from a registration object.
+
+Uses the `padding_mode` from the registration configuration.
+"""
+function affine_transform(
+    x::AbstractArray{T},
+    affine::AbstractArray{T, 3},
+    reg::AffineRegistration;
+    shape = nothing
+) where T
+    return affine_transform(x, affine; shape=shape, padding_mode=reg.padding_mode)
+end
