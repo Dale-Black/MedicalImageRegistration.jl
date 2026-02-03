@@ -219,69 +219,68 @@ Compute linear elasticity penalty for a displacement field.
 Scalar penalty value (mean squared Frobenius norm of stress tensor).
 
 # Implementation Notes
-Following torchreg, this computes **second-order spatial derivatives** of the
-displacement field using a specific approach:
+Matches torchreg's LinearElasticity exactly by:
+1. Converting Julia array to torchreg format (permuting axes)
+2. Computing jacobi_gradient using central differences with convolution
+3. Computing second-order derivatives
+4. Combining into stress tensor and returning mean Frobenius norm
 
-1. First compute gradients of u: grad[deriv_dir, spatial..., component]
-2. For each derivative direction, compute gradients again to get second derivatives
-3. Combine into stress tensor and compute mean Frobenius norm
-
-The result matches torchreg's LinearElasticity regularizer.
+Note: Only supports batch size N=1 for torchreg compatibility.
 """
 function (reg::LinearElasticity{T})(u::AbstractArray{T, 5}) where T
     X, Y, Z, C, N = size(u)
     @assert C == 3 "Expected 3 displacement components, got $C"
+    @assert N == 1 "LinearElasticity currently only supports batch size 1"
 
-    # Create or retrieve identity grid
+    # Convert from Julia (X, Y, Z, 3, N) to torchreg (N, Z, Y, X, 3) format
+    u_torch = permutedims(u, (5, 3, 2, 1, 4))  # (N, Z, Y, X, 3) = (1, Z, Y, X, 3)
+
+    # Create identity grid in torchreg format (1, Z, Y, X, 3)
     if reg.id_grid === nothing || reg.refresh_id_grid
-        reg.id_grid = create_identity_grid((X, Y, Z), T)
+        reg.id_grid = _create_id_grid_torchreg(Z, Y, X, T)
     end
     id_grid = reg.id_grid
 
-    # First-order gradients using torchreg-style jacobi_gradient
-    # This computes gradients in a specific way that we need to match
-    gradients = _jacobi_gradient_torchreg_style(u, id_grid)
-    # Shape: (3, X, Y, Z, 3) where first 3 is deriv direction (z,y,x order like torchreg)
-    # and last 3 is displacement component
+    # First-order gradients
+    # Output: (3, Z, Y, X, 3) where first 3 = component, last 3 = deriv direction
+    gradients = _jacobi_gradient_torchreg(u_torch, id_grid)
 
-    # Second-order derivatives following torchreg exactly:
-    # u_xz, u_xy, u_xx = jacobi_gradient(gradients[None, 2], id_grid)  # x-derivatives
-    # u_yz, u_yy, u_yx = jacobi_gradient(gradients[None, 1], id_grid)  # y-derivatives
-    # u_zz, u_zy, u_zx = jacobi_gradient(gradients[None, 0], id_grid)  # z-derivatives
+    # Second-order derivatives following torchreg:
+    # u_xz, u_xy, u_xx = jacobi_gradient(gradients[None, 2], id_grid)
+    # u_yz, u_yy, u_yx = jacobi_gradient(gradients[None, 1], id_grid)
+    # u_zz, u_zy, u_zx = jacobi_gradient(gradients[None, 0], id_grid)
+    #
+    # gradients[None, c] extracts component c and adds batch dim: (1, Z, Y, X, 3)
 
-    # In Julia, gradients has shape (3, X, Y, Z, 3)
-    # We need to extract each derivative direction and compute second derivatives
+    # Extract each component and compute second derivatives
+    # Component indexing: 0=u_x, 1=u_y, 2=u_z (Julia 1-indexed: 1,2,3)
+    grad_comp3 = reshape(gradients[3, :, :, :, :], 1, Z, Y, X, 3)  # u_z derivatives
+    grad_comp2 = reshape(gradients[2, :, :, :, :], 1, Z, Y, X, 3)  # u_y derivatives
+    grad_comp1 = reshape(gradients[1, :, :, :, :], 1, Z, Y, X, 3)  # u_x derivatives
 
-    # Extract x-derivatives (index 3 in Julia = index 2 in torchreg's 0-indexing)
-    # gradients[3, :, :, :, :] has shape (X, Y, Z, 3)
-    grad_x = reshape(gradients[3, :, :, :, :], 1, X, Y, Z, 3)  # (1, X, Y, Z, 3)
-    grad_y = reshape(gradients[2, :, :, :, :], 1, X, Y, Z, 3)  # (1, X, Y, Z, 3)
-    grad_z = reshape(gradients[1, :, :, :, :], 1, X, Y, Z, 3)  # (1, X, Y, Z, 3)
+    grad2_comp3 = _jacobi_gradient_torchreg(grad_comp3, id_grid)  # (3, Z, Y, X, 3)
+    grad2_comp2 = _jacobi_gradient_torchreg(grad_comp2, id_grid)
+    grad2_comp1 = _jacobi_gradient_torchreg(grad_comp1, id_grid)
 
-    # Permute to (X, Y, Z, 3, 1) for our jacobi_gradient
-    grad_x_perm = permutedims(grad_x, (2, 3, 4, 5, 1))  # (X, Y, Z, 3, 1)
-    grad_y_perm = permutedims(grad_y, (2, 3, 4, 5, 1))  # (X, Y, Z, 3, 1)
-    grad_z_perm = permutedims(grad_z, (2, 3, 4, 5, 1))  # (X, Y, Z, 3, 1)
+    # torchreg unpacking: result[0]=z-deriv, result[1]=y-deriv, result[2]=x-deriv (0-indexed)
+    # Julia: result[1]=first component (which was z), etc.
+    # But actually the unpacking u_xz, u_xy, u_xx = jacobi_gradient(...) unpacks along first dim
+    # So output[0] -> u_xz (confusing naming, but matches torchreg structure)
 
-    # Compute second derivatives
-    grad2_x = _jacobi_gradient_torchreg_style(grad_x_perm, id_grid)  # (3, X, Y, Z, 3)
-    grad2_y = _jacobi_gradient_torchreg_style(grad_y_perm, id_grid)  # (3, X, Y, Z, 3)
-    grad2_z = _jacobi_gradient_torchreg_style(grad_z_perm, id_grid)  # (3, X, Y, Z, 3)
+    # From grad2_comp3 (gradients of u_z):
+    u_xz = grad2_comp3[1, :, :, :, :]  # (Z, Y, X, 3)
+    u_xy = grad2_comp3[2, :, :, :, :]
+    u_xx = grad2_comp3[3, :, :, :, :]
 
-    # Extract second derivatives
-    # grad2_x[d, ...] = ∂/∂x_d of (∂u/∂x) for all components
-    # torchreg indexing: 0=z, 1=y, 2=x, so Julia: 1=z, 2=y, 3=x
-    u_xz = grad2_x[1, :, :, :, :]  # ∂²/∂z∂x for all components
-    u_xy = grad2_x[2, :, :, :, :]  # ∂²/∂y∂x for all components
-    u_xx = grad2_x[3, :, :, :, :]  # ∂²/∂x∂x for all components
+    # From grad2_comp2 (gradients of u_y):
+    u_yz = grad2_comp2[1, :, :, :, :]
+    u_yy = grad2_comp2[2, :, :, :, :]
+    u_yx = grad2_comp2[3, :, :, :, :]
 
-    u_yz = grad2_y[1, :, :, :, :]
-    u_yy = grad2_y[2, :, :, :, :]
-    u_yx = grad2_y[3, :, :, :, :]
-
-    u_zz = grad2_z[1, :, :, :, :]
-    u_zy = grad2_z[2, :, :, :, :]
-    u_zx = grad2_z[3, :, :, :, :]
+    # From grad2_comp1 (gradients of u_x):
+    u_zz = grad2_comp1[1, :, :, :, :]
+    u_zy = grad2_comp1[2, :, :, :, :]
+    u_zx = grad2_comp1[3, :, :, :, :]
 
     # Symmetric shear components
     e_xy = T(0.5) .* (u_xy .+ u_yx)
@@ -307,76 +306,100 @@ function (reg::LinearElasticity{T})(u::AbstractArray{T, 5}) where T
 end
 
 """
-    _jacobi_gradient_torchreg_style(u, id_grid)
-
-Compute jacobi gradient in torchreg's style.
-
-Input u: (X, Y, Z, 3, N) in Julia convention
-Output: (3, X, Y, Z, 3) where first 3 is deriv direction (z, y, x order) and last 3 is component.
-        Note: batch dimension is collapsed since torchreg doesn't preserve it in gradient output.
+Create identity grid in torchreg format: (1, Z, Y, X, 3)
+Coordinates are normalized to [-1, 1].
+Last dimension contains (x, y, z) coordinates.
 """
-function _jacobi_gradient_torchreg_style(u::AbstractArray{T, 5}, id_grid) where T
-    X, Y, Z, C, N = size(u)
+function _create_id_grid_torchreg(Z::Int, Y::Int, X::Int, ::Type{T}) where T
+    grid = zeros(T, 1, Z, Y, X, 3)
+
+    xs = collect(T, range(T(-1), T(1), length=X))
+    ys = collect(T, range(T(-1), T(1), length=Y))
+    zs = collect(T, range(T(-1), T(1), length=Z))
+
+    @inbounds for k in 1:Z, j in 1:Y, i in 1:X
+        grid[1, k, j, i, 1] = xs[i]  # x-coordinate
+        grid[1, k, j, i, 2] = ys[j]  # y-coordinate
+        grid[1, k, j, i, 3] = zs[k]  # z-coordinate
+    end
+
+    return grid
+end
+
+"""
+Compute jacobi gradient matching torchreg's implementation.
+
+Input: u with shape (N, Z, Y, X, 3) where N=1
+Output: (3, Z, Y, X, 3) where first 3 = component treated as batch, last 3 = deriv direction
+
+Uses central differences with [-0.5, 0, 0.5] kernel and boundary replication.
+"""
+function _jacobi_gradient_torchreg(u::AbstractArray{T, 5}, id_grid::AbstractArray{T, 5}) where T
+    N, Z, Y, X, C = size(u)
+    @assert N == 1 "Only batch size 1 supported"
     @assert C == 3 "Expected 3 components"
-    @assert N == 1 "torchreg-style gradient only supports batch size 1"
 
-    # Scale displacement from normalized [-1,1] to voxel coordinates
-    # Following torchreg: x = 0.5 * (u + id_grid) * (shape - 1)
-    scale_z = T(Z - 1)
-    scale_y = T(Y - 1)
-    scale_x = T(X - 1)
+    # Scale: x = 0.5 * (u + id_grid) * (shape - 1)
+    # shape = (Z, Y, X) in torchreg convention
+    scale_factors = T.([Z - 1, Y - 1, X - 1])
 
-    # Output: (3_deriv_dirs, X, Y, Z, 3_components)
-    # Derivative direction order: (z, y, x) to match torchreg's (0, 1, 2)
-    gradients = zeros(T, 3, X, Y, Z, 3)
+    # Scaled coordinates
+    scaled = zeros(T, N, Z, Y, X, C)
+    @inbounds for c in 1:3
+        scale = scale_factors[c == 1 ? 3 : (c == 2 ? 2 : 1)]  # x->X, y->Y, z->Z
+        for i in 1:X, j in 1:Y, k in 1:Z
+            scaled[1, k, j, i, c] = T(0.5) * (u[1, k, j, i, c] + id_grid[1, k, j, i, c]) * scale
+        end
+    end
 
-    @inbounds for c in 1:3  # Component
-        # Scale factor for this component
-        scale = c == 1 ? scale_x : (c == 2 ? scale_y : scale_z)
+    # Output: (3_components, Z, Y, X, 3_deriv_dirs)
+    # After torchreg's permutation scheme, the output has:
+    # - First dim = original component (treated as batch during conv)
+    # - Last dim = derivative direction (conv output channels)
+    gradients = zeros(T, 3, Z, Y, X, 3)
 
-        for k in 1:Z, j in 1:Y, i in 1:X
-            # Current scaled value: 0.5 * (u + grid) * (size - 1)
-            # id_grid[c, i, j, k] gives normalized coord for component c
-            x_curr = T(0.5) * (u[i, j, k, c, 1] + id_grid[c, i, j, k]) * scale
+    # Central difference: derivative in each direction
+    # torchreg kernel setup:
+    # w[2,0,:,1,1] = window -> D derivative (Z direction) -> output channel 2
+    # w[1,0,1,:,1] = window -> H derivative (Y direction) -> output channel 1
+    # w[0,0,1,1,:] = window -> W derivative (X direction) -> output channel 0
+    #
+    # So output channels: 0=X-deriv, 1=Y-deriv, 2=Z-deriv
 
-            # z-derivative (deriv index 1 = z direction, stored in output[1, ...])
-            if k == 1
-                x_next = T(0.5) * (u[i, j, 2, c, 1] + id_grid[c, i, j, 2]) * scale
-                gradients[1, i, j, k, c] = x_next - x_curr
-            elseif k == Z
-                x_prev = T(0.5) * (u[i, j, Z-1, c, 1] + id_grid[c, i, j, Z-1]) * scale
-                gradients[1, i, j, k, c] = x_curr - x_prev
-            else
-                x_prev = T(0.5) * (u[i, j, k-1, c, 1] + id_grid[c, i, j, k-1]) * scale
-                x_next = T(0.5) * (u[i, j, k+1, c, 1] + id_grid[c, i, j, k+1]) * scale
-                gradients[1, i, j, k, c] = T(0.5) * (x_next - x_prev)
-            end
-
-            # y-derivative (deriv index 2 = y direction)
-            if j == 1
-                x_next = T(0.5) * (u[i, 2, k, c, 1] + id_grid[c, i, 2, k]) * scale
-                gradients[2, i, j, k, c] = x_next - x_curr
-            elseif j == Y
-                x_prev = T(0.5) * (u[i, Y-1, k, c, 1] + id_grid[c, i, Y-1, k]) * scale
-                gradients[2, i, j, k, c] = x_curr - x_prev
-            else
-                x_prev = T(0.5) * (u[i, j-1, k, c, 1] + id_grid[c, i, j-1, k]) * scale
-                x_next = T(0.5) * (u[i, j+1, k, c, 1] + id_grid[c, i, j+1, k]) * scale
-                gradients[2, i, j, k, c] = T(0.5) * (x_next - x_prev)
-            end
-
-            # x-derivative (deriv index 3 = x direction)
+    @inbounds for c in 1:3  # Component (becomes batch in torchreg)
+        for i in 1:X, j in 1:Y, k in 1:Z
+            # X derivative (output channel 0, stored at deriv index 1 in Julia)
             if i == 1
-                x_next = T(0.5) * (u[2, j, k, c, 1] + id_grid[c, 2, j, k]) * scale
-                gradients[3, i, j, k, c] = x_next - x_curr
+                dx = scaled[1, k, j, 2, c] - scaled[1, k, j, 1, c]
             elseif i == X
-                x_prev = T(0.5) * (u[X-1, j, k, c, 1] + id_grid[c, X-1, j, k]) * scale
-                gradients[3, i, j, k, c] = x_curr - x_prev
+                dx = scaled[1, k, j, X, c] - scaled[1, k, j, X-1, c]
             else
-                x_prev = T(0.5) * (u[i-1, j, k, c, 1] + id_grid[c, i-1, j, k]) * scale
-                x_next = T(0.5) * (u[i+1, j, k, c, 1] + id_grid[c, i+1, j, k]) * scale
-                gradients[3, i, j, k, c] = T(0.5) * (x_next - x_prev)
+                dx = T(0.5) * (scaled[1, k, j, i+1, c] - scaled[1, k, j, i-1, c])
             end
+
+            # Y derivative (output channel 1, stored at deriv index 2)
+            if j == 1
+                dy = scaled[1, k, 2, i, c] - scaled[1, k, 1, i, c]
+            elseif j == Y
+                dy = scaled[1, k, Y, i, c] - scaled[1, k, Y-1, i, c]
+            else
+                dy = T(0.5) * (scaled[1, k, j+1, i, c] - scaled[1, k, j-1, i, c])
+            end
+
+            # Z derivative (output channel 2, stored at deriv index 3)
+            if k == 1
+                dz = scaled[1, 2, j, i, c] - scaled[1, 1, j, i, c]
+            elseif k == Z
+                dz = scaled[1, Z, j, i, c] - scaled[1, Z-1, j, i, c]
+            else
+                dz = T(0.5) * (scaled[1, k+1, j, i, c] - scaled[1, k-1, j, i, c])
+            end
+
+            # Store in output (component, Z, Y, X, deriv_dir)
+            # deriv_dir: 1=X, 2=Y, 3=Z (matching torchreg channel order 0,1,2)
+            gradients[c, k, j, i, 1] = dx
+            gradients[c, k, j, i, 2] = dy
+            gradients[c, k, j, i, 3] = dz
         end
     end
 

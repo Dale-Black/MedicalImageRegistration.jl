@@ -1275,3 +1275,83 @@ Functional correctness is verified.
 - ✅ Tests cover both 2D and 3D cases
 
 ---
+
+## [IMPL-AFFINE-001] Implement AffineRegistration struct and types
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+### Implementation Summary
+
+Implemented `AffineRegistration` mutable struct and `AffineParameters` struct in `src/types.jl` and `src/affine.jl`.
+
+#### Structs Implemented
+
+1. **`AffineParameters{T}`** - Stores learnable transformation parameters:
+   - `translation::Array{T}` - shape `(ndim, batch_size)`
+   - `rotation::Array{T}` - shape `(ndim, ndim, batch_size)`
+   - `zoom::Array{T}` - shape `(ndim, batch_size)`
+   - `shear::Array{T}` - shape `(ndim, batch_size)`
+
+2. **`AffineRegistration{T, F, O}`** - Main registration struct:
+   - Configuration: `ndims`, `scales`, `iterations`, `learning_rate`
+   - Optimization: `verbose`, `dissimilarity_fn`, `optimizer`
+   - Transform flags: `with_translation`, `with_rotation`, `with_zoom`, `with_shear`
+   - Interpolation: `interp_mode`, `padding_mode`, `align_corners`
+   - Optional initial parameters: `init_translation`, `init_rotation`, `init_zoom`, `init_shear`
+   - Learned state: `parameters`, `loss`
+
+#### Functions Implemented
+
+1. **`AffineRegistration(; kwargs...)`** - Constructor with sensible defaults:
+   - `ndims=3`, `scales=(4, 2)`, `iterations=(500, 100)`
+   - `learning_rate=1e-2`, `verbose=true`
+   - `dissimilarity_fn=mse_loss`, `optimizer=Adam`
+   - `with_translation=true`, `with_rotation=true`, `with_zoom=true`, `with_shear=false`
+   - `padding_mode=:border`, `align_corners=true`
+   - Auto-selects `:trilinear` for 3D, `:bilinear` for 2D
+
+2. **`init_parameters(reg, batch_size)`** - Initialize parameters:
+   - Translation → zeros
+   - Rotation → identity matrices
+   - Zoom → ones
+   - Shear → zeros
+
+3. **`check_parameter_shapes(params, ndim, batch_size)`** - Validation helper
+
+4. **`mse_loss(x, y)`** - Default MSE loss function
+
+#### Defaults Matching torchreg
+
+| Parameter | torchreg | Julia |
+|-----------|----------|-------|
+| scales | (4, 2) | (4, 2) |
+| iterations | (500, 100) | (500, 100) |
+| learning_rate | 1e-2 | 1e-2f0 |
+| optimizer | Adam | Adam |
+| with_translation | true | true |
+| with_rotation | true | true |
+| with_zoom | true | true |
+| with_shear | false | false |
+| padding_mode | 'border' | :border |
+| align_corners | true | true |
+
+#### Test Results
+
+All tests pass:
+- 3D default construction works
+- 2D construction with auto interp_mode selection
+- Custom configuration
+- Parameter initialization for batch_size > 1
+- Initial parameter values correct (zeros, identity, ones)
+- Custom initial parameters preserved
+
+### Acceptance Criteria Verification
+
+- ✅ AffineRegistration struct with all config fields
+- ✅ Constructor with sensible defaults matching torchreg
+- ✅ Supports both 2D (ndims=2) and 3D (ndims=3)
+- ✅ Stores learned parameters after registration (via `parameters` field)
+
+---

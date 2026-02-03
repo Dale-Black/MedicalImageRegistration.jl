@@ -222,7 +222,7 @@
       "id": "IMPL-AFFINE-001",
       "type": "IMPL",
       "title": "Implement AffineRegistration struct and types",
-      "status": "open",
+      "status": "done",
       "priority": 7,
       "blockedBy": ["TEST-METRICS-001"],
       "description": "Implement AffineRegistration mutable struct in src/types.jl and src/affine.jl. Store all configuration: scales, iterations, learning_rate, loss function, optimizer, parameter flags, interpolation settings.",

@@ -1,2 +1,277 @@
 # Affine registration implementation
-# This file will be populated by the ralph loop
+
+using Optimisers: Adam
+
+# Default MSE loss for affine registration
+"""
+    mse_loss(x, y)
+
+Mean squared error loss function.
+
+Returns `mean((x - y)^2)`.
+"""
+mse_loss(x, y) = mean((x .- y) .^ 2)
+
+# ============================================================================
+# AffineRegistration Constructor
+# ============================================================================
+
+"""
+    AffineRegistration(;
+        ndims=3,
+        scales=(4, 2),
+        iterations=(500, 100),
+        learning_rate=1e-2f0,
+        verbose=true,
+        dissimilarity_fn=mse_loss,
+        optimizer=Adam,
+        with_translation=true,
+        with_rotation=true,
+        with_zoom=true,
+        with_shear=false,
+        interp_mode=nothing,
+        padding_mode=:border,
+        align_corners=true,
+        init_translation=nothing,
+        init_rotation=nothing,
+        init_zoom=nothing,
+        init_shear=nothing
+    )
+
+Create an affine registration object with the specified configuration.
+
+# Arguments
+
+## Required Configuration
+- `ndims::Int=3`: Number of spatial dimensions (2 or 3)
+
+## Multi-resolution Pyramid
+- `scales::Tuple=(4, 2)`: Downsampling factors for pyramid levels.
+  Images are downsampled by 1/scale at each level.
+- `iterations::Tuple=(500, 100)`: Optimization iterations per pyramid level.
+  Must have same length as `scales`.
+
+## Optimization
+- `learning_rate::Real=1e-2`: Learning rate for optimizer
+- `verbose::Bool=true`: Display progress during registration
+- `dissimilarity_fn=mse_loss`: Loss function. Can be:
+  - `mse_loss` (default): Mean squared error
+  - `dice_loss`: Dice loss for segmentation masks
+  - `NCC(kernel_size)`: Normalized cross-correlation
+- `optimizer=Adam`: Optimizer type from Optimisers.jl
+
+## Transformation Components
+- `with_translation::Bool=true`: Optimize translation
+- `with_rotation::Bool=true`: Optimize rotation
+- `with_zoom::Bool=true`: Optimize scaling
+- `with_shear::Bool=false`: Optimize shear
+
+## Interpolation
+- `interp_mode::Union{Symbol, Nothing}=nothing`: Interpolation mode.
+  If `nothing`, automatically selects `:bilinear` for 2D, `:trilinear` for 3D.
+- `padding_mode::Symbol=:border`: Padding for out-of-bounds.
+  Options: `:border` (replicate edge), `:zeros`
+- `align_corners::Bool=true`: Align corner pixels in interpolation
+
+## Initial Parameters (optional)
+- `init_translation`: Initial translation, shape `(ndims, batch_size)`
+- `init_rotation`: Initial rotation matrix, shape `(ndims, ndims, batch_size)`
+- `init_zoom`: Initial zoom/scale, shape `(ndims, batch_size)`
+- `init_shear`: Initial shear, shape `(ndims, batch_size)`
+
+# Returns
+- `AffineRegistration`: Registration object ready for use with `register()`
+
+# Example
+```julia
+# Basic 3D registration
+reg = AffineRegistration(ndims=3)
+
+# 2D registration with custom settings
+reg = AffineRegistration(
+    ndims=2,
+    scales=(4, 2, 1),
+    iterations=(200, 100, 50),
+    learning_rate=5e-3f0,
+    dissimilarity_fn=NCC(7)
+)
+
+# Registration without zoom/shear (rigid only)
+reg = AffineRegistration(
+    ndims=3,
+    with_zoom=false,
+    with_shear=false
+)
+```
+
+# Notes
+- The `scales` and `iterations` tuples must have the same length.
+- For medical images, `padding_mode=:border` (default) usually works best.
+- Setting `verbose=true` shows a progress bar during optimization.
+- After calling `register()`, the learned parameters are stored in `reg.parameters`.
+"""
+function AffineRegistration(;
+    ndims::Int = 3,
+    scales::Tuple{Vararg{Int}} = (4, 2),
+    iterations::Tuple{Vararg{Int}} = (500, 100),
+    learning_rate::Real = 1e-2,
+    verbose::Bool = true,
+    dissimilarity_fn = mse_loss,
+    optimizer = Adam,
+    with_translation::Bool = true,
+    with_rotation::Bool = true,
+    with_zoom::Bool = true,
+    with_shear::Bool = false,
+    interp_mode::Union{Symbol, Nothing} = nothing,
+    padding_mode::Symbol = :border,
+    align_corners::Bool = true,
+    init_translation = nothing,
+    init_rotation = nothing,
+    init_zoom = nothing,
+    init_shear = nothing
+)
+    # Validate inputs
+    @assert ndims in (2, 3) "ndims must be 2 or 3, got $ndims"
+    @assert length(scales) == length(iterations) "scales and iterations must have same length"
+    @assert all(s > 0 for s in scales) "all scales must be positive"
+    @assert all(i > 0 for i in iterations) "all iterations must be positive"
+    @assert padding_mode in (:border, :zeros) "padding_mode must be :border or :zeros"
+
+    # Auto-select interpolation mode based on dimensions
+    if interp_mode === nothing
+        interp_mode = ndims == 3 ? :trilinear : :bilinear
+    end
+
+    # Convert learning rate to Float32
+    T = Float32
+    lr = T(learning_rate)
+
+    # Convert initial parameters to Float32 if provided
+    init_t = init_translation === nothing ? nothing : T.(init_translation)
+    init_r = init_rotation === nothing ? nothing : T.(init_rotation)
+    init_z = init_zoom === nothing ? nothing : T.(init_zoom)
+    init_s = init_shear === nothing ? nothing : T.(init_shear)
+
+    return AffineRegistration{T, typeof(dissimilarity_fn), typeof(optimizer)}(
+        ndims,
+        scales,
+        iterations,
+        lr,
+        verbose,
+        dissimilarity_fn,
+        optimizer,
+        with_translation,
+        with_rotation,
+        with_zoom,
+        with_shear,
+        interp_mode,
+        padding_mode,
+        align_corners,
+        init_t,
+        init_r,
+        init_z,
+        init_s,
+        nothing,  # parameters (learned state)
+        nothing   # loss (learned state)
+    )
+end
+
+# ============================================================================
+# Parameter Initialization
+# ============================================================================
+
+"""
+    init_parameters(reg::AffineRegistration, batch_size::Int) -> AffineParameters
+
+Initialize affine transformation parameters for optimization.
+
+# Arguments
+- `reg`: AffineRegistration object with configuration
+- `batch_size`: Number of images in the batch
+
+# Returns
+- `AffineParameters`: Struct containing translation, rotation, zoom, and shear arrays
+
+# Notes
+- Parameters are initialized based on `reg.init_*` fields if provided
+- Translation initialized to zeros
+- Rotation initialized to identity matrix
+- Zoom initialized to ones
+- Shear initialized to zeros
+- Parameter gradients are controlled by `reg.with_*` flags during optimization
+"""
+function init_parameters(reg::AffineRegistration{T}, batch_size::Int) where T
+    ndim = reg.ndims
+
+    # Initialize translation: (ndim, batch_size)
+    if reg.init_translation !== nothing
+        translation = copy(reg.init_translation)
+    else
+        translation = zeros(T, ndim, batch_size)
+    end
+
+    # Initialize rotation: (ndim, ndim, batch_size) - identity matrices
+    if reg.init_rotation !== nothing
+        rotation = copy(reg.init_rotation)
+    else
+        rotation = zeros(T, ndim, ndim, batch_size)
+        @inbounds for n in 1:batch_size
+            for i in 1:ndim
+                rotation[i, i, n] = one(T)
+            end
+        end
+    end
+
+    # Initialize zoom: (ndim, batch_size) - ones
+    if reg.init_zoom !== nothing
+        zoom = copy(reg.init_zoom)
+    else
+        zoom = ones(T, ndim, batch_size)
+    end
+
+    # Initialize shear: (ndim, batch_size) - zeros
+    if reg.init_shear !== nothing
+        shear = copy(reg.init_shear)
+    else
+        shear = zeros(T, ndim, batch_size)
+    end
+
+    return AffineParameters{T}(translation, rotation, zoom, shear)
+end
+
+"""
+    check_parameter_shapes(params::AffineParameters, ndim::Int, batch_size::Int)
+
+Validate that all parameter arrays have the correct shapes.
+
+Throws `ArgumentError` if any shapes are incorrect.
+"""
+function check_parameter_shapes(params::AffineParameters, ndim::Int, batch_size::Int)
+    # Check translation shape: (ndim, batch_size)
+    if size(params.translation) != (ndim, batch_size)
+        throw(ArgumentError(
+            "Expected translation shape ($ndim, $batch_size), got $(size(params.translation))"
+        ))
+    end
+
+    # Check rotation shape: (ndim, ndim, batch_size)
+    if size(params.rotation) != (ndim, ndim, batch_size)
+        throw(ArgumentError(
+            "Expected rotation shape ($ndim, $ndim, $batch_size), got $(size(params.rotation))"
+        ))
+    end
+
+    # Check zoom shape: (ndim, batch_size)
+    if size(params.zoom) != (ndim, batch_size)
+        throw(ArgumentError(
+            "Expected zoom shape ($ndim, $batch_size), got $(size(params.zoom))"
+        ))
+    end
+
+    # Check shear shape: (ndim, batch_size)
+    if size(params.shear) != (ndim, batch_size)
+        throw(ArgumentError(
+            "Expected shear shape ($ndim, $batch_size), got $(size(params.shear))"
+        ))
+    end
+end
