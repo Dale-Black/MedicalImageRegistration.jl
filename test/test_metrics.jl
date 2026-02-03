@@ -76,6 +76,31 @@ using Random
 
         # Note: NCC parity is verified for N=1 (single batch) cases only
         # torchreg has a quirk where kernel shape depends on batch size
+        # torchreg NCC only supports 3D (uses conv3d directly), so 2D parity tests
+        # are not possible. Our Julia implementation correctly supports 2D with conv2d.
+
+        @testset "2D functionality (N=1)" begin
+            # Note: Can't test parity with torchreg - it uses conv3d even for 2D inputs
+            # which gives incorrect results. We test that our 2D implementation works correctly.
+            pred_julia = rand(Float32, 12, 12, 1, 1)
+            targ_julia = rand(Float32, 12, 12, 1, 1)
+
+            ncc_julia = NCC(kernel_size=7)
+            julia_loss = ncc_julia(pred_julia, targ_julia)
+
+            @test isfinite(julia_loss)
+            @test julia_loss <= 0  # NCC should be non-positive (negative of positive correlation)
+        end
+
+        @testset "2D identical images (N=1)" begin
+            # Identical images should give NCC close to -1 (highly correlated)
+            same = rand(Float32, 10, 10, 1, 1)
+
+            ncc_julia = NCC(kernel_size=5)
+            julia_loss = ncc_julia(same, same)
+
+            @test julia_loss < -0.9  # Should be close to -1
+        end
 
         @testset "3D N=1 kernel_size=7" begin
             pred_julia = rand(Float32, 9, 9, 9, 1, 1)
