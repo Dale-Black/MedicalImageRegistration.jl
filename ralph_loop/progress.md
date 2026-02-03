@@ -1581,3 +1581,82 @@ affine = get_affine(reg)
 - ✅ API is clean and Julian (uses keyword arguments, multiple dispatch)
 
 ---
+
+## [TEST-AFFINE-001] Parity tests for AffineRegistration
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+### Test Summary
+
+Implemented comprehensive parity tests in `test/test_affine.jl` comparing Julia implementation to torchreg.
+
+#### compose_affine Parity Tests (7 test sets, 16 tests)
+
+| Test | Result |
+|------|--------|
+| 3D identity parameters | ✅ Match rtol=1e-5 |
+| 2D identity parameters | ✅ Match rtol=1e-5 |
+| 3D with translation | ✅ Match rtol=1e-5 |
+| 3D with zoom | ✅ Match rtol=1e-5 |
+| 3D with shear | ✅ Match rtol=1e-5 |
+| batch_size > 1 (N=2) | ✅ Match rtol=1e-5 |
+| random parameters | ✅ Match rtol=1e-5 |
+
+**Key implementation detail**: PyTorch uses `(N, ndim, ndim+1)` while Julia uses `(ndim, ndim+1, N)` - axis permutation verified.
+
+#### affine_transform Parity Tests (6 test sets, 10 tests)
+
+| Test | Result |
+|------|--------|
+| 3D identity transform | ✅ Match rtol=1e-4 |
+| 2D identity transform | ✅ Match rtol=1e-4 |
+| 3D translation transform | ✅ Match rtol=1e-4 |
+| 3D zoom transform | ✅ Match rtol=1e-4 |
+| batch_size > 1 (N=2) | ✅ Match rtol=1e-4 |
+| output shape resizing | ✅ Match rtol=1e-4 |
+
+**Note**: Both padding modes (`:border`, `:zeros`) tested successfully.
+
+#### Registration Convergence Tests (4 test sets, 11 tests)
+
+| Test | Description | Result |
+|------|-------------|--------|
+| 3D synthetic translation recovery | Gaussian blob shifted 2 voxels | ✅ Loss < 0.01, translation recovered within 20% |
+| 2D synthetic translation recovery | 2D Gaussian blob shifted | ✅ Loss < 0.01 |
+| 3D zoom recovery | Smaller blob needs zoom | ✅ Loss decreases |
+| batch_size=2 | Batch processing | ✅ No NaN/Inf, correct shapes |
+
+**Key finding**: Registration successfully recovers known translations with expected_tx ≈ 0.25 (shift/half_width) in normalized [-1, 1] coordinates.
+
+#### API Tests (3 test sets, 6 tests)
+
+| Test | Result |
+|------|--------|
+| transform function | ✅ Works on new images |
+| get_affine function | ✅ Returns (3, 4, 1) |
+| custom dissimilarity function | ✅ Works with dice_loss |
+
+### Test Count Summary
+
+- **Total tests**: 43
+- **compose_affine parity**: 16 tests
+- **affine_transform parity**: 10 tests
+- **Registration convergence**: 11 tests
+- **API**: 6 tests
+
+### Acceptance Criteria Verification
+
+- ✅ compose_affine matches torchreg within rtol=1e-5
+- ✅ affine_transform matches within rtol=1e-4
+- ✅ Registration converges to similar parameters (rtol=0.2 for translation recovery)
+- ✅ Tests cover 2D and 3D, batch_size=1 and 2
+
+### Implementation Notes
+
+1. **Array conversion**: Used `np.ascontiguousarray()` to ensure proper memory layout when converting Julia arrays to PyTorch tensors
+2. **Python slicing**: Used `pyimport("builtins").slice()` to create Python slice objects for proper PyTorch tensor indexing
+3. **Axis permutation**: Julia `(ndim, ndim+1, N)` ↔ PyTorch `(N, ndim, ndim+1)` via `permutedims(arr, (3, 1, 2))`
+
+---

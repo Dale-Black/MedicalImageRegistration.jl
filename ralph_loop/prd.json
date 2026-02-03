@@ -307,7 +307,7 @@
       "id": "TEST-AFFINE-001",
       "type": "TEST",
       "title": "Parity tests for AffineRegistration",
-      "status": "open",
+      "status": "done",
       "priority": 9,
       "blockedBy": ["IMPL-AFFINE-005"],
       "description": "Write comprehensive parity tests for AffineRegistration. Test: (1) compose_affine produces same matrix as torchreg, (2) affine_transform produces same output, (3) Full registration on synthetic data converges similarly.",
