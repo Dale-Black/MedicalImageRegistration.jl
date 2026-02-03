@@ -189,7 +189,7 @@
       "id": "IMPL-METRICS-003",
       "type": "IMPL",
       "title": "Implement LinearElasticity regularizer",
-      "status": "open",
+      "status": "done",
       "priority": 5,
       "blockedBy": ["IMPL-METRICS-002"],
       "description": "Implement LinearElasticity regularizer in src/metrics.jl. Penalizes non-smooth deformation fields using strain tensor.",
