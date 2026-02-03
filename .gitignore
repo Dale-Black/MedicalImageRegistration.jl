@@ -1,0 +1,42 @@
+# Julia artifacts
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+Manifest.toml
+
+# Build artifacts
+/deps/deps.jl
+/deps/build.log
+/deps/usr/
+/deps/src/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation build
+/docs/build/
+/docs/site/
+
+# Test artifacts
+/test/output/
+*.png
+*.nii
+*.nii.gz
+
+# Ralph loop (autonomous agent workspace)
+ralph_loop/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Coverage
+lcov.info
+coverage/
