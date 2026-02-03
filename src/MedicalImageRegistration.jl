@@ -19,7 +19,7 @@ include("metrics.jl")
 # Exports
 export AffineRegistration, SyNRegistration
 export AffineParameters
-export register, transform, get_affine
+export register, transform, get_affine, compose_affine
 export dice_loss, dice_score, NCC, LinearElasticity
 export mse_loss, init_parameters
 

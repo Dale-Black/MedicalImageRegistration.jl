@@ -275,3 +275,151 @@ function check_parameter_shapes(params::AffineParameters, ndim::Int, batch_size:
         ))
     end
 end
+
+# ============================================================================
+# Compose Affine Matrix
+# ============================================================================
+
+"""
+    compose_affine(params::AffineParameters{T}) where T
+    compose_affine(translation, rotation, zoom, shear)
+
+Compose an affine transformation matrix from individual components.
+
+# Arguments
+- `params`: AffineParameters struct, or individual arrays:
+  - `translation`: Translation vector, shape `(ndim, batch_size)`
+  - `rotation`: Rotation matrix, shape `(ndim, ndim, batch_size)`
+  - `zoom`: Scaling factors, shape `(ndim, batch_size)`
+  - `shear`: Shear parameters, shape `(ndim, batch_size)`
+
+# Returns
+- Affine matrix of shape `(ndim, ndim+1, batch_size)`
+
+# Matrix Construction
+
+For 3D (ndim=3), the affine matrix is constructed as:
+
+```
+[zoom_x  shear_xy  shear_xz] [r00 r01 r02]   [tx]
+[  0     zoom_y    shear_yz] [r10 r11 r12] | [ty]
+[  0       0       zoom_z  ] [r20 r21 r22]   [tz]
+
+= rotation @ scale_shear + translation
+```
+
+Where:
+- First, a scale/shear matrix is created with zoom on diagonal and shear off-diagonal
+- The rotation matrix is multiplied with this scale/shear matrix
+- Translation is concatenated as the last column
+
+For 2D (ndim=2):
+- shear has 1 component: shear_xy
+- Matrix is 2×3
+
+# Example
+```julia
+params = init_parameters(reg, 1)
+affine = compose_affine(params)  # (3, 4, 1) for 3D
+
+# Or with individual arrays
+affine = compose_affine(translation, rotation, zoom, shear)
+```
+
+# Notes
+- Identity parameters produce identity affine (no transformation)
+- The matrix is in homogeneous coordinates: applies rotation/scale/shear then translation
+"""
+function compose_affine(params::AffineParameters{T}) where T
+    return compose_affine(params.translation, params.rotation, params.zoom, params.shear)
+end
+
+function compose_affine(
+    translation::AbstractArray{T},
+    rotation::AbstractArray{T},
+    zoom::AbstractArray{T},
+    shear::AbstractArray{T}
+) where T
+    ndim = size(zoom, 1)
+    batch_size = size(zoom, 2)
+
+    # Validate shapes
+    @assert size(translation) == (ndim, batch_size) "translation shape mismatch"
+    @assert size(rotation) == (ndim, ndim, batch_size) "rotation shape mismatch"
+    @assert size(shear) == (ndim, batch_size) "shear shape mismatch"
+
+    # Create scale/shear matrix: diagonal embed of zoom with shear off-diagonal
+    # This is equivalent to torch.diag_embed(zoom) with shear entries added
+    scale_shear = zeros(T, ndim, ndim, batch_size)
+
+    @inbounds for n in 1:batch_size
+        # Diagonal: zoom factors
+        for i in 1:ndim
+            scale_shear[i, i, n] = zoom[i, n]
+        end
+
+        # Off-diagonal: shear
+        if ndim == 3
+            # 3D case: shear has 3 components
+            # square_matrix[..., 0, 1:] = shear[..., :2]  -> row 0, cols 1,2
+            # square_matrix[..., 1, 2] = shear[..., 2]    -> row 1, col 2
+            # Julia: 1-indexed, so row 1 cols 2,3 and row 2 col 3
+            scale_shear[1, 2, n] = shear[1, n]  # shear_xy
+            scale_shear[1, 3, n] = shear[2, n]  # shear_xz
+            scale_shear[2, 3, n] = shear[3, n]  # shear_yz
+        else  # ndim == 2
+            # 2D case: shear has 1 component (but stored as 2 for consistency)
+            # square_matrix[..., 0, 1] = shear[..., 0]
+            scale_shear[1, 2, n] = shear[1, n]  # shear_xy
+        end
+    end
+
+    # Multiply rotation @ scale_shear for each batch element
+    # rotation: (ndim, ndim, batch_size)
+    # scale_shear: (ndim, ndim, batch_size)
+    # result: (ndim, ndim, batch_size)
+    rot_scale = zeros(T, ndim, ndim, batch_size)
+    @inbounds for n in 1:batch_size
+        # Matrix multiplication: rotation[:,:,n] * scale_shear[:,:,n]
+        for i in 1:ndim, j in 1:ndim
+            for k in 1:ndim
+                rot_scale[i, j, n] += rotation[i, k, n] * scale_shear[k, j, n]
+            end
+        end
+    end
+
+    # Concatenate translation as last column
+    # affine: (ndim, ndim+1, batch_size)
+    affine = zeros(T, ndim, ndim + 1, batch_size)
+    @inbounds for n in 1:batch_size
+        # Copy rotation @ scale_shear part
+        for i in 1:ndim, j in 1:ndim
+            affine[i, j, n] = rot_scale[i, j, n]
+        end
+        # Add translation as last column
+        for i in 1:ndim
+            affine[i, ndim + 1, n] = translation[i, n]
+        end
+    end
+
+    return affine
+end
+
+"""
+    get_affine(reg::AffineRegistration) -> Array
+
+Get the composed affine transformation matrix from a registration object.
+
+# Returns
+- Affine matrix of shape `(ndim, ndim+1, batch_size)`
+
+# Notes
+- Must be called after `register()` has been run
+- Throws error if `reg.parameters` is `nothing`
+"""
+function get_affine(reg::AffineRegistration)
+    if reg.parameters === nothing
+        error("No parameters available. Run register() first.")
+    end
+    return compose_affine(reg.parameters)
+end

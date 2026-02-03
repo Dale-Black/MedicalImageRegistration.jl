@@ -239,7 +239,7 @@
       "id": "IMPL-AFFINE-002",
       "type": "IMPL",
       "title": "Implement init_parameters and compose_affine",
-      "status": "open",
+      "status": "done",
       "priority": 7,
       "blockedBy": ["IMPL-AFFINE-001"],
       "description": "Implement init_parameters() to create translation, rotation, zoom, shear parameters. Implement compose_affine() to build affine matrix from these components.",

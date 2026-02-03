@@ -1355,3 +1355,58 @@ All tests pass:
 - ✅ Stores learned parameters after registration (via `parameters` field)
 
 ---
+
+## [IMPL-AFFINE-002] Implement init_parameters and compose_affine
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+### Implementation Summary
+
+Note: `init_parameters` was already implemented in IMPL-AFFINE-001. This story focused on implementing `compose_affine`.
+
+#### compose_affine Function
+
+Implemented `compose_affine(params::AffineParameters)` and `compose_affine(translation, rotation, zoom, shear)` in `src/affine.jl`.
+
+**Matrix Construction:**
+```
+For 3D:
+affine = rotation @ scale_shear + translation
+
+where scale_shear = [zoom_x  shear_xy  shear_xz]
+                    [  0     zoom_y    shear_yz]
+                    [  0       0       zoom_z  ]
+```
+
+**Input/Output shapes:**
+- `translation`: `(ndim, batch_size)`
+- `rotation`: `(ndim, ndim, batch_size)`
+- `zoom`: `(ndim, batch_size)`
+- `shear`: `(ndim, batch_size)`
+- Output: `(ndim, ndim+1, batch_size)`
+
+#### get_affine Function
+
+Implemented `get_affine(reg::AffineRegistration)` to retrieve the composed affine matrix from a registration object after `register()` has been called.
+
+### Test Results
+
+All tests pass:
+- ✅ 3D identity parameters → identity affine
+- ✅ 2D identity parameters → identity affine
+- ✅ Translation added to last column
+- ✅ Zoom on diagonal
+- ✅ Batch dimension handled correctly (batch_size=3)
+- ✅ 3D shear in off-diagonal positions
+- ✅ get_affine retrieves correct matrix
+
+### Acceptance Criteria Verification
+
+- ✅ init_parameters creates correct shapes for 2D and 3D (done in IMPL-AFFINE-001)
+- ✅ compose_affine builds [n_dim, n_dim+1] affine matrix
+- ✅ Identity parameters produce identity affine
+- ✅ Handles batch dimension
+
+---
