@@ -858,12 +858,55 @@ end
 
 ---
 
-### 6. Implementation Recommendations
+### 6. Important Discovery: Zygote.jl as Alternative to Enzyme
 
-1. **Start with flat parameter vector** - easier to integrate with Enzyme/Optimisers
+During testing, discovered that **Enzyme.jl has issues differentiating through `NNlib.grid_sample`** (EnzymeRuntimeActivityError). However, **Zygote.jl works correctly**:
+
+```julia
+using Zygote
+using NNlib
+
+function test_loss(grid, input)
+    output = NNlib.grid_sample(input, grid; padding_mode=:border)
+    return sum(output)
+end
+
+# Zygote gradient works!
+grad, = Zygote.gradient(g -> test_loss(g, input), grid)
+```
+
+**Recommendation**: Use Zygote.jl for autodiff through grid_sample. NNlib provides `∇grid_sample` for manual gradient computation if needed.
+
+The package now includes Zygote as a dependency.
+
+---
+
+### 7. Implementation Recommendations
+
+1. **Use Zygote for autodiff** - works with NNlib.grid_sample out of the box
 2. **Use NamedTuples for structured params** - Optimisers.jl handles them naturally
 3. **Cache identity grids** - create once, reuse for same spatial sizes
 4. **Test grid_sample carefully** - coordinate conventions can be tricky
-5. **Use `@code_warntype`** - ensure type stability for Enzyme compatibility
+5. **Use `@code_warntype`** - ensure type stability for best performance
+
+---
+
+## [RESEARCH-002] Completion Notes
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+All acceptance criteria met:
+- ✅ Documented NNlib.grid_sample signature and padding modes (`:zeros`, `:border`)
+- ✅ Showed affine_grid implementation approach (meshgrid + matmul)
+- ✅ Documented Enzyme autodiff pattern (though Zygote preferred for grid_sample)
+- ✅ Documented Optimisers.jl setup and update pattern
+
+**Key findings**:
+1. NNlib.grid_sample uses `(ndim, ...spatial, N)` grid format
+2. Coordinates in [-1, 1], align_corners=true behavior
+3. Zygote works better than Enzyme for grid_sample differentiation
+4. Optimisers.jl uses immutable update pattern: `state, params = update(state, params, grads)`
 
 ---

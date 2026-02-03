@@ -1,7 +1,6 @@
 module MedicalImageRegistration
 
 # Dependencies
-using AcceleratedKernels
 using NNlib
 using Optimisers
 
