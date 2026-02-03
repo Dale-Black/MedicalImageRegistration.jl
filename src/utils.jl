@@ -1,6 +1,7 @@
 # Utility functions for MedicalImageRegistration.jl
 
 using LinearAlgebra
+using Zygote: ignore_derivatives
 
 """
     create_identity_grid(spatial_size::NTuple{2, Int}, ::Type{T}=Float32) where T
@@ -74,22 +75,28 @@ function affine_grid(theta::AbstractArray{T, 3}, spatial_size::NTuple{2, Int}) w
     X, Y = spatial_size
 
     # Create identity grid: (2, X, Y)
-    id_grid = create_identity_grid(spatial_size, T)
+    # Use ignore_derivatives since grid creation doesn't depend on theta
+    id_grid = ignore_derivatives() do
+        create_identity_grid(spatial_size, T)
+    end
 
     # Flatten spatial dims: (2, X*Y)
     num_points = X * Y
     flat_grid = reshape(id_grid, ndim, num_points)
 
     # Add homogeneous coordinate: (3, X*Y)
-    ones_row = ones(T, 1, num_points)
+    ones_row = ignore_derivatives() do
+        ones(T, 1, num_points)
+    end
     homogeneous_grid = vcat(flat_grid, ones_row)
 
-    # Apply transformation for each batch element
-    # theta[:, :, n] @ homogeneous_grid → (2, X*Y)
-    output_grid = zeros(T, ndim, num_points, N)
-    @inbounds for n in 1:N
-        output_grid[:, :, n] .= theta[:, :, n] * homogeneous_grid
-    end
+    # Batched matrix multiply using einsum-like operation
+    # theta: (ndim, ndim+1, N), homogeneous_grid: (ndim+1, num_points)
+    # result: (ndim, num_points, N)
+    # Use NNlib.batched_mul for Zygote compatibility
+    # Reshape theta to (ndim, ndim+1, N) and expand homogeneous to (ndim+1, num_points, N)
+    homogeneous_batch = repeat(reshape(homogeneous_grid, ndim + 1, num_points, 1), 1, 1, N)
+    output_grid = NNlib.batched_mul(theta, homogeneous_batch)
 
     # Reshape to (2, X, Y, N) for NNlib.grid_sample
     return reshape(output_grid, ndim, X, Y, N)
@@ -121,22 +128,26 @@ function affine_grid(theta::AbstractArray{T, 3}, spatial_size::NTuple{3, Int}) w
     X, Y, Z = spatial_size
 
     # Create identity grid: (3, X, Y, Z)
-    id_grid = create_identity_grid(spatial_size, T)
+    # Use ignore_derivatives since grid creation doesn't depend on theta
+    id_grid = ignore_derivatives() do
+        create_identity_grid(spatial_size, T)
+    end
 
     # Flatten spatial dims: (3, X*Y*Z)
     num_points = X * Y * Z
     flat_grid = reshape(id_grid, ndim, num_points)
 
     # Add homogeneous coordinate: (4, X*Y*Z)
-    ones_row = ones(T, 1, num_points)
+    ones_row = ignore_derivatives() do
+        ones(T, 1, num_points)
+    end
     homogeneous_grid = vcat(flat_grid, ones_row)
 
-    # Apply transformation for each batch element
-    # theta[:, :, n] @ homogeneous_grid → (3, X*Y*Z)
-    output_grid = zeros(T, ndim, num_points, N)
-    @inbounds for n in 1:N
-        output_grid[:, :, n] .= theta[:, :, n] * homogeneous_grid
-    end
+    # Batched matrix multiply using NNlib.batched_mul for Zygote compatibility
+    # theta: (ndim, ndim+1, N), homogeneous_grid: (ndim+1, num_points)
+    # result: (ndim, num_points, N)
+    homogeneous_batch = repeat(reshape(homogeneous_grid, ndim + 1, num_points, 1), 1, 1, N)
+    output_grid = NNlib.batched_mul(theta, homogeneous_batch)
 
     # Reshape to (3, X, Y, Z, N) for NNlib.grid_sample
     return reshape(output_grid, ndim, X, Y, Z, N)

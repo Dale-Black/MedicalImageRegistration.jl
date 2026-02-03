@@ -4,6 +4,7 @@ module MedicalImageRegistration
 using NNlib
 using Optimisers
 using Statistics
+using Zygote
 
 # Core types and utilities
 include("types.jl")

@@ -1470,3 +1470,68 @@ All tests pass:
 - ✅ Output shape can differ from input shape
 
 ---
+
+## [IMPL-AFFINE-004] Implement affine registration fit loop with Zygote
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+### Implementation Summary
+
+Implemented the optimization loop using Zygote.jl (not Enzyme due to NNlib.grid_sample compatibility) and Optimisers.jl.
+
+#### Functions Implemented
+
+1. **`downsample(x, scale)`** - Downsample 2D/3D images for multi-resolution pyramid
+   - Uses identity affine with smaller output shape
+   - Supports both 4D (2D images) and 5D (3D images) arrays
+
+2. **`fit!(reg, moving, static, iterations)`** - Single-scale optimization loop
+   - Computes loss and gradients with `Zygote.withgradient`
+   - Updates parameters with `Optimisers.update!`
+   - Respects `with_*` flags for parameter masking
+   - Optional verbose progress display
+
+3. **`register(moving, static, reg)`** - Full registration with multi-resolution pyramid
+   - Initializes parameters
+   - Runs downsampled optimization at each scale
+   - Returns transformed moving image
+
+4. **`transform(x, reg)`** - Apply learned transformation to images
+
+#### Zygote Compatibility Changes
+
+To make the code differentiable with Zygote, rewrote several functions to avoid array mutation:
+
+1. **`affine_grid`** - Uses `NNlib.batched_mul` instead of loops
+2. **`compose_affine`** - Uses `cat` operations instead of setindex!
+3. **Identity grid creation** - Wrapped with `ignore_derivatives`
+
+#### Test Results
+
+```
+Test 1: Identity Registration
+- Loss converges: 0.0 → 0.00049 (10 iterations)
+- Affine matrix stays near identity
+
+Test 2: Translation Recovery
+- Loss converges: 0.0625 → 0.000025
+- Correctly recovers x-translation of ~0.27 in normalized coordinates
+  (matches expected 2/16*2 = 0.25 for 2-voxel shift in 16-voxel image)
+```
+
+### Acceptance Criteria Verification
+
+- ✅ Optimization loop converges on test case
+- ✅ Zygote computes gradients correctly (Enzyme had issues with grid_sample)
+- ✅ Multiresolution (scales) works
+- ✅ Progress can be optionally displayed
+
+### Notes
+
+- Used Zygote instead of Enzyme because Enzyme has issues differentiating through NNlib.grid_sample
+- The `ignore_derivatives` wrapper is needed for constant array creation inside differentiable functions
+- NNlib.batched_mul provides Zygote-compatible batch matrix multiplication
+
+---

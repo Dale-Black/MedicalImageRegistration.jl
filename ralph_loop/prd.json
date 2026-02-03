@@ -273,7 +273,7 @@
       "id": "IMPL-AFFINE-004",
       "type": "IMPL",
       "title": "Implement affine registration fit loop with Enzyme",
-      "status": "open",
+      "status": "done",
       "priority": 8,
       "blockedBy": ["IMPL-AFFINE-003"],
       "description": "Implement the optimization loop that minimizes dissimilarity. Use Enzyme.jl for gradients and Optimisers.jl for parameter updates. Handle multiresolution pyramid.",

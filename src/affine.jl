@@ -1,6 +1,7 @@
 # Affine registration implementation
 
 using Optimisers: Adam
+using Zygote: ignore_derivatives
 
 # Default MSE loss for affine registration
 """
@@ -348,59 +349,79 @@ function compose_affine(
     @assert size(rotation) == (ndim, ndim, batch_size) "rotation shape mismatch"
     @assert size(shear) == (ndim, batch_size) "shear shape mismatch"
 
-    # Create scale/shear matrix: diagonal embed of zoom with shear off-diagonal
-    # This is equivalent to torch.diag_embed(zoom) with shear entries added
-    scale_shear = zeros(T, ndim, ndim, batch_size)
-
-    @inbounds for n in 1:batch_size
-        # Diagonal: zoom factors
-        for i in 1:ndim
-            scale_shear[i, i, n] = zoom[i, n]
+    # Build scale/shear matrix in a Zygote-compatible way
+    # We construct the matrix elements explicitly and use cat/stack
+    if ndim == 3
+        # 3D case: scale_shear is a 3x3 upper triangular matrix
+        # [zoom_x  shear_xy  shear_xz]
+        # [  0     zoom_y    shear_yz]
+        # [  0       0       zoom_z  ]
+        z_zeros = ignore_derivatives() do
+            zeros(T, 1, batch_size)
         end
 
-        # Off-diagonal: shear
-        if ndim == 3
-            # 3D case: shear has 3 components
-            # square_matrix[..., 0, 1:] = shear[..., :2]  -> row 0, cols 1,2
-            # square_matrix[..., 1, 2] = shear[..., 2]    -> row 1, col 2
-            # Julia: 1-indexed, so row 1 cols 2,3 and row 2 col 3
-            scale_shear[1, 2, n] = shear[1, n]  # shear_xy
-            scale_shear[1, 3, n] = shear[2, n]  # shear_xz
-            scale_shear[2, 3, n] = shear[3, n]  # shear_yz
-        else  # ndim == 2
-            # 2D case: shear has 1 component (but stored as 2 for consistency)
-            # square_matrix[..., 0, 1] = shear[..., 0]
-            scale_shear[1, 2, n] = shear[1, n]  # shear_xy
+        # Row 1: [zoom[1], shear[1], shear[2]]
+        row1 = cat(
+            reshape(zoom[1, :], 1, 1, batch_size),
+            reshape(shear[1, :], 1, 1, batch_size),
+            reshape(shear[2, :], 1, 1, batch_size),
+            dims=2
+        )  # (1, 3, batch_size)
+
+        # Row 2: [0, zoom[2], shear[3]]
+        row2 = cat(
+            reshape(z_zeros, 1, 1, batch_size),
+            reshape(zoom[2, :], 1, 1, batch_size),
+            reshape(shear[3, :], 1, 1, batch_size),
+            dims=2
+        )  # (1, 3, batch_size)
+
+        # Row 3: [0, 0, zoom[3]]
+        row3 = cat(
+            reshape(z_zeros, 1, 1, batch_size),
+            reshape(z_zeros, 1, 1, batch_size),
+            reshape(zoom[3, :], 1, 1, batch_size),
+            dims=2
+        )  # (1, 3, batch_size)
+
+        scale_shear = cat(row1, row2, row3, dims=1)  # (3, 3, batch_size)
+    else
+        # 2D case: scale_shear is a 2x2 upper triangular matrix
+        # [zoom_x  shear_xy]
+        # [  0     zoom_y  ]
+        z_zeros = ignore_derivatives() do
+            zeros(T, 1, batch_size)
         end
+
+        # Row 1: [zoom[1], shear[1]]
+        row1 = cat(
+            reshape(zoom[1, :], 1, 1, batch_size),
+            reshape(shear[1, :], 1, 1, batch_size),
+            dims=2
+        )  # (1, 2, batch_size)
+
+        # Row 2: [0, zoom[2]]
+        row2 = cat(
+            reshape(z_zeros, 1, 1, batch_size),
+            reshape(zoom[2, :], 1, 1, batch_size),
+            dims=2
+        )  # (1, 2, batch_size)
+
+        scale_shear = cat(row1, row2, dims=1)  # (2, 2, batch_size)
     end
 
-    # Multiply rotation @ scale_shear for each batch element
+    # Batched matrix multiply: rotation @ scale_shear
     # rotation: (ndim, ndim, batch_size)
     # scale_shear: (ndim, ndim, batch_size)
-    # result: (ndim, ndim, batch_size)
-    rot_scale = zeros(T, ndim, ndim, batch_size)
-    @inbounds for n in 1:batch_size
-        # Matrix multiplication: rotation[:,:,n] * scale_shear[:,:,n]
-        for i in 1:ndim, j in 1:ndim
-            for k in 1:ndim
-                rot_scale[i, j, n] += rotation[i, k, n] * scale_shear[k, j, n]
-            end
-        end
-    end
+    # Use NNlib.batched_mul for Zygote compatibility
+    rot_scale = NNlib.batched_mul(rotation, scale_shear)  # (ndim, ndim, batch_size)
 
     # Concatenate translation as last column
-    # affine: (ndim, ndim+1, batch_size)
-    affine = zeros(T, ndim, ndim + 1, batch_size)
-    @inbounds for n in 1:batch_size
-        # Copy rotation @ scale_shear part
-        for i in 1:ndim, j in 1:ndim
-            affine[i, j, n] = rot_scale[i, j, n]
-        end
-        # Add translation as last column
-        for i in 1:ndim
-            affine[i, ndim + 1, n] = translation[i, n]
-        end
-    end
+    # translation: (ndim, batch_size) -> reshape to (ndim, 1, batch_size)
+    trans_col = reshape(translation, ndim, 1, batch_size)
+
+    # affine = [rot_scale | translation]
+    affine = cat(rot_scale, trans_col, dims=2)  # (ndim, ndim+1, batch_size)
 
     return affine
 end
@@ -525,5 +546,271 @@ function affine_transform(
     reg::AffineRegistration;
     shape = nothing
 ) where T
+    return affine_transform(x, affine; shape=shape, padding_mode=reg.padding_mode)
+end
+
+# ============================================================================
+# Image Resizing for Multi-resolution Pyramid
+# ============================================================================
+
+"""
+    downsample(x::AbstractArray{T, 4}, scale::Int) where T
+
+Downsample a 2D image by the given scale factor using bilinear interpolation.
+
+Input shape: `(X, Y, C, N)` → Output: `(X÷scale, Y÷scale, C, N)`
+"""
+function downsample(x::AbstractArray{T, 4}, scale::Int) where T
+    X, Y, C, N = size(x)
+    new_X = max(1, X ÷ scale)
+    new_Y = max(1, Y ÷ scale)
+
+    # Create identity affine for resampling
+    affine = identity_affine(2, N, T)
+
+    return affine_transform(x, affine; shape=(new_X, new_Y), padding_mode=:border)
+end
+
+"""
+    downsample(x::AbstractArray{T, 5}, scale::Int) where T
+
+Downsample a 3D image by the given scale factor using trilinear interpolation.
+
+Input shape: `(X, Y, Z, C, N)` → Output: `(X÷scale, Y÷scale, Z÷scale, C, N)`
+"""
+function downsample(x::AbstractArray{T, 5}, scale::Int) where T
+    X, Y, Z, C, N = size(x)
+    new_X = max(1, X ÷ scale)
+    new_Y = max(1, Y ÷ scale)
+    new_Z = max(1, Z ÷ scale)
+
+    # Create identity affine for resampling
+    affine = identity_affine(3, N, T)
+
+    return affine_transform(x, affine; shape=(new_X, new_Y, new_Z), padding_mode=:border)
+end
+
+# ============================================================================
+# Optimization Loop
+# ============================================================================
+
+"""
+    fit!(reg::AffineRegistration, moving, static, iterations::Int; verbose=nothing)
+
+Run optimization for a single resolution level.
+
+# Arguments
+- `reg`: AffineRegistration with parameters already initialized
+- `moving`: Moving image to transform, shape `(...spatial, C, N)`
+- `static`: Static target image, same shape as moving
+- `iterations`: Number of optimization iterations
+
+# Notes
+- Modifies `reg.parameters` in place
+- Uses Zygote for gradient computation
+- Uses Optimisers.jl for parameter updates
+"""
+function fit!(
+    reg::AffineRegistration{T},
+    moving::AbstractArray{T},
+    static::AbstractArray{T},
+    iterations::Int;
+    verbose::Union{Nothing, Bool} = nothing
+) where T
+    verbose = verbose === nothing ? reg.verbose : verbose
+    params = reg.parameters
+
+    # Get spatial shape of static image
+    ndim = ndims(static) - 2  # Remove C and N dimensions
+    target_shape = size(static)[1:ndim]
+
+    # Pack parameters into a tuple for optimization
+    # We need to optimize: translation, rotation, zoom, shear
+    # But only those enabled by with_* flags
+
+    # Create parameter tuple based on what we're optimizing
+    param_tuple = (
+        params.translation,
+        params.rotation,
+        params.zoom,
+        params.shear
+    )
+
+    # Setup optimizer
+    opt_rule = reg.optimizer(reg.learning_rate)
+    opt_state = Optimisers.setup(opt_rule, param_tuple)
+
+    # Optimization loop
+    local loss_val
+    for iter in 1:iterations
+        # Compute loss and gradients using Zygote
+        loss_val, grads = Zygote.withgradient(param_tuple) do p
+            # Unpack parameters
+            t, r, z, s = p
+
+            # Compose affine matrix
+            affine = compose_affine(t, r, z, s)
+
+            # Transform moving image
+            moved = affine_transform(moving, affine; shape=target_shape, padding_mode=reg.padding_mode)
+
+            # Compute dissimilarity
+            reg.dissimilarity_fn(moved, static)
+        end
+
+        # Get gradients
+        grad_tuple = grads[1]
+
+        # Zero out gradients for parameters we're not optimizing
+        grad_translation = reg.with_translation ? grad_tuple[1] : zero(grad_tuple[1])
+        grad_rotation = reg.with_rotation ? grad_tuple[2] : zero(grad_tuple[2])
+        grad_zoom = reg.with_zoom ? grad_tuple[3] : zero(grad_tuple[3])
+        grad_shear = reg.with_shear ? grad_tuple[4] : zero(grad_tuple[4])
+
+        masked_grads = (grad_translation, grad_rotation, grad_zoom, grad_shear)
+
+        # Update parameters
+        opt_state, param_tuple = Optimisers.update!(opt_state, param_tuple, masked_grads)
+
+        # Display progress
+        if verbose && (iter == 1 || iter % 50 == 0 || iter == iterations)
+            println("  Iteration $iter/$iterations: loss = $(round(loss_val; digits=6))")
+        end
+    end
+
+    # Store updated parameters back
+    reg.parameters = AffineParameters{T}(
+        param_tuple[1],
+        param_tuple[2],
+        param_tuple[3],
+        param_tuple[4]
+    )
+    reg.loss = T(loss_val)
+
+    return loss_val
+end
+
+"""
+    register(moving, static, reg::AffineRegistration; return_moved=true)
+
+Perform affine registration of moving image to static image.
+
+# Arguments
+- `moving`: Moving image to register, shape `(...spatial, C, N)`
+- `static`: Static target image, same shape convention
+- `reg`: AffineRegistration configuration object
+- `return_moved`: If true, return the transformed moving image
+
+# Returns
+- If `return_moved=true`: Transformed moving image
+- If `return_moved=false`: `nothing` (use `transform(image, reg)` to apply later)
+
+# Notes
+- Initializes parameters, runs multi-resolution optimization
+- After completion, `reg.parameters` contains learned transformation
+- Use `get_affine(reg)` to retrieve the affine matrix
+- Use `transform(image, reg)` to apply transformation to other images
+
+# Example
+```julia
+reg = AffineRegistration(ndims=3, scales=(4, 2), iterations=(200, 100))
+moved = register(moving, static, reg)
+
+# Apply same transform to another image
+other_moved = transform(other_image, reg)
+```
+"""
+function register(
+    moving::AbstractArray{T},
+    static::AbstractArray{T},
+    reg::AffineRegistration{T};
+    return_moved::Bool = true
+) where T
+    # Validate input shapes
+    @assert ndims(moving) == ndims(static) "moving and static must have same number of dimensions"
+    expected_ndims = reg.ndims + 2  # spatial + C + N
+    @assert ndims(moving) == expected_ndims "Expected $(expected_ndims)D arrays for ndims=$(reg.ndims), got $(ndims(moving))D"
+
+    # Get batch size from static image (last dimension)
+    batch_size = size(static)[end]
+
+    # Initialize parameters
+    reg.parameters = init_parameters(reg, batch_size)
+
+    # Get target spatial shape
+    ndim = reg.ndims
+    target_shape = size(static)[1:ndim]
+
+    # Resize moving to match static spatial dimensions if needed
+    moving_shape = size(moving)[1:ndim]
+    if moving_shape != target_shape
+        moving_affine = identity_affine(ndim, batch_size, T)
+        moving = affine_transform(moving, moving_affine; shape=target_shape, padding_mode=reg.padding_mode)
+    end
+
+    # Multi-resolution optimization
+    if reg.verbose
+        println("Starting affine registration...")
+        println("  Target shape: $target_shape")
+        println("  Scales: $(reg.scales)")
+        println("  Iterations: $(reg.iterations)")
+    end
+
+    for (scale, iters) in zip(reg.scales, reg.iterations)
+        if reg.verbose
+            println("Scale 1/$scale:")
+        end
+
+        # Downsample images
+        if scale > 1
+            moving_small = downsample(moving, scale)
+            static_small = downsample(static, scale)
+        else
+            moving_small = moving
+            static_small = static
+        end
+
+        # Run optimization at this scale
+        fit!(reg, moving_small, static_small, iters)
+    end
+
+    if reg.verbose
+        println("Registration complete. Final loss: $(reg.loss)")
+    end
+
+    # Return transformed image if requested
+    if return_moved
+        return transform(moving, reg)
+    else
+        return nothing
+    end
+end
+
+"""
+    transform(x, reg::AffineRegistration; shape=nothing)
+
+Apply learned transformation to an image.
+
+# Arguments
+- `x`: Image to transform
+- `reg`: AffineRegistration with learned parameters
+- `shape`: Optional output shape (uses input shape if not specified)
+
+# Returns
+- Transformed image
+
+# Notes
+- Must be called after `register()` has been run
+"""
+function transform(
+    x::AbstractArray{T},
+    reg::AffineRegistration{T};
+    shape = nothing
+) where T
+    if reg.parameters === nothing
+        error("No parameters available. Run register() first.")
+    end
+
+    affine = compose_affine(reg.parameters)
     return affine_transform(x, affine; shape=shape, padding_mode=reg.padding_mode)
 end
