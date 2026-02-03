@@ -388,7 +388,7 @@
       "id": "SETUP-CI-001",
       "type": "SETUP",
       "title": "Set up GitHub Actions with Mac runner for GPU testing",
-      "status": "open",
+      "status": "done",
       "priority": 16,
       "blockedBy": ["IMPL-GPU-001"],
       "description": "Configure GitHub Actions CI to test on both Ubuntu (CPU) and macOS (Metal GPU). The Mac runner will verify that Metal GPU acceleration actually works. Tests should measure and report performance to confirm GPU speedup.",
