@@ -1535,3 +1535,49 @@ Test 2: Translation Recovery
 - NNlib.batched_mul provides Zygote-compatible batch matrix multiplication
 
 ---
+
+## [IMPL-AFFINE-005] Implement register and transform API
+
+**Date**: 2026-02-03
+
+**Status**: DONE (implemented as part of IMPL-AFFINE-004)
+
+### Implementation Summary
+
+The main API functions were implemented as part of IMPL-AFFINE-004:
+
+1. **`register(moving, static, reg::AffineRegistration; return_moved=true)`**
+   - Validates input shapes
+   - Initializes parameters
+   - Runs multi-resolution pyramid optimization
+   - Returns transformed moving image
+
+2. **`transform(x, reg::AffineRegistration; shape=nothing)`**
+   - Applies learned transformation to any image
+   - Supports optional output shape
+
+3. **`get_affine(reg::AffineRegistration)`**
+   - Returns the composed affine matrix from learned parameters
+
+### API Examples
+
+```julia
+# Create and run registration
+reg = AffineRegistration(ndims=3, scales=(4, 2), iterations=(200, 100))
+moved = register(moving, static, reg)
+
+# Apply same transform to another image
+other_moved = transform(other_image, reg)
+
+# Get the affine matrix
+affine = get_affine(reg)
+```
+
+### Acceptance Criteria Verification
+
+- ✅ register() runs full registration and returns moved image
+- ✅ transform() applies learned transform to new images
+- ✅ get_affine() returns the affine matrix
+- ✅ API is clean and Julian (uses keyword arguments, multiple dispatch)
+
+---

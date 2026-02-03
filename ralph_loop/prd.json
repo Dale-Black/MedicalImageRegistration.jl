@@ -290,7 +290,7 @@
       "id": "IMPL-AFFINE-005",
       "type": "IMPL",
       "title": "Implement register and transform API",
-      "status": "open",
+      "status": "done",
       "priority": 8,
       "blockedBy": ["IMPL-AFFINE-004"],
       "description": "Implement the main API: register(moving, static, reg::AffineRegistration), transform(image, reg), get_affine(reg). These are the user-facing functions.",
