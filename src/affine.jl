@@ -1,8 +1,7 @@
 # Affine registration implementation
 
 using Optimisers: Adam
-
-# Note: _constant() is defined in utils.jl
+using Mooncake
 
 # Default MSE loss for affine registration
 """
@@ -591,149 +590,59 @@ function downsample(x::AbstractArray{T, 5}, scale::Int) where T
 end
 
 # ============================================================================
-# Manual Gradient Computation Helpers
+# Mooncake AD-based Gradient Computation
 # ============================================================================
 
 """
-    _affine_grid_backward(d_grid, spatial_size, batch_size, ::Type{T}) where T
+    _affine_loss_fn(params, moving, static, target_shape, padding_mode)
 
-Compute gradient of affine_grid with respect to theta (affine matrix).
+Pure loss function for Mooncake AD differentiation.
 
-Given d_grid (gradient w.r.t. output grid), computes d_theta.
-
-affine_grid computes: output = theta @ homogeneous_coords
-So the gradient is: d_theta = d_output @ homogeneous_coords^T
+Takes flattened parameters tuple (translation, rotation, zoom, shear) and returns scalar loss.
 """
-function _affine_grid_backward(
-    d_grid::AbstractArray{T},
-    spatial_size::NTuple{N, Int},
-    batch_size::Int
+function _affine_loss_fn(
+    params::NTuple{4, AbstractArray{T}},
+    moving::AbstractArray{T},
+    static::AbstractArray{T},
+    target_shape::NTuple{N, Int},
+    padding_mode::Symbol
 ) where {T, N}
-    ndim = N
-    num_points = prod(spatial_size)
+    translation, rotation, zoom, shear = params
 
-    # Create identity grid and homogeneous coordinates
-    id_grid = create_identity_grid(spatial_size, T)
-    flat_grid = reshape(id_grid, ndim, num_points)
-    ones_row = ones(T, 1, num_points)
-    homogeneous_grid = vcat(flat_grid, ones_row)  # (ndim+1, num_points)
+    # Compose affine matrix
+    affine = compose_affine(translation, rotation, zoom, shear)
 
-    # d_grid is (ndim, ...spatial..., batch_size)
-    d_grid_flat = reshape(d_grid, ndim, num_points, batch_size)
+    # Create sampling grid
+    grid = affine_grid(affine, target_shape)
 
-    # d_theta = d_grid_flat @ homogeneous_grid^T for each batch
-    d_theta = zeros(T, ndim, ndim + 1, batch_size)
-    @inbounds for n in 1:batch_size
-        d_theta[:, :, n] = d_grid_flat[:, :, n] * homogeneous_grid'
-    end
+    # Sample moving image at grid positions
+    moved = grid_sample(moving, grid; padding_mode=padding_mode)
 
-    return d_theta
+    # MSE loss
+    return mean((moved .- static) .^ 2)
 end
 
-"""
-    _compose_affine_backward_3d(d_affine, rotation, zoom, shear)
-
-Compute gradients of compose_affine with respect to translation, rotation, zoom, shear.
-
-For 3D case: affine = [rotation @ scale_shear | translation]
-where scale_shear is upper triangular with zoom on diagonal and shear off-diagonal.
-"""
-function _compose_affine_backward_3d(
-    d_affine::AbstractArray{T, 3},
-    rotation::AbstractArray{T, 3},
-    zoom::AbstractArray{T, 2},
-    shear::AbstractArray{T, 2}
-) where T
-    batch_size = size(zoom, 2)
-
-    # Reconstruct scale_shear matrix
-    scale_shear = zeros(T, 3, 3, batch_size)
-    @inbounds for n in 1:batch_size
-        scale_shear[1, 1, n] = zoom[1, n]
-        scale_shear[1, 2, n] = shear[1, n]
-        scale_shear[1, 3, n] = shear[2, n]
-        scale_shear[2, 2, n] = zoom[2, n]
-        scale_shear[2, 3, n] = shear[3, n]
-        scale_shear[3, 3, n] = zoom[3, n]
-    end
-
-    # d_translation = d_affine[:, 4, :] (last column)
-    d_translation = d_affine[:, 4, :]
-
-    # d_rot_scale = d_affine[:, 1:3, :] (first 3 columns)
-    d_rot_scale = d_affine[:, 1:3, :]
-
-    # rot_scale = rotation @ scale_shear
-    # d_rotation = d_rot_scale @ scale_shear^T
-    # d_scale_shear = rotation^T @ d_rot_scale
-    d_rotation = NNlib.batched_mul(d_rot_scale, NNlib.batched_transpose(scale_shear))
-    d_scale_shear = NNlib.batched_mul(NNlib.batched_transpose(rotation), d_rot_scale)
-
-    # Extract d_zoom and d_shear from d_scale_shear
-    d_zoom = zeros(T, 3, batch_size)
-    d_shear = zeros(T, 3, batch_size)
-    @inbounds for n in 1:batch_size
-        d_zoom[1, n] = d_scale_shear[1, 1, n]
-        d_zoom[2, n] = d_scale_shear[2, 2, n]
-        d_zoom[3, n] = d_scale_shear[3, 3, n]
-        d_shear[1, n] = d_scale_shear[1, 2, n]
-        d_shear[2, n] = d_scale_shear[1, 3, n]
-        d_shear[3, n] = d_scale_shear[2, 3, n]
-    end
-
-    return d_translation, d_rotation, d_zoom, d_shear
-end
+# Thread-local cache for Mooncake rules to avoid rebuilding each iteration
+const _MOONCAKE_RULE_CACHE = Dict{Any, Any}()
 
 """
-    _compose_affine_backward_2d(d_affine, rotation, zoom, shear)
+    _get_or_build_rule(f, args...)
 
-Compute gradients of compose_affine with respect to translation, rotation, zoom, shear.
-
-For 2D case: affine = [rotation @ scale_shear | translation]
+Get cached Mooncake rule or build a new one.
 """
-function _compose_affine_backward_2d(
-    d_affine::AbstractArray{T, 3},
-    rotation::AbstractArray{T, 3},
-    zoom::AbstractArray{T, 2},
-    shear::AbstractArray{T, 2}
-) where T
-    batch_size = size(zoom, 2)
-
-    # Reconstruct scale_shear matrix for 2D
-    scale_shear = zeros(T, 2, 2, batch_size)
-    @inbounds for n in 1:batch_size
-        scale_shear[1, 1, n] = zoom[1, n]
-        scale_shear[1, 2, n] = shear[1, n]
-        scale_shear[2, 2, n] = zoom[2, n]
+function _get_or_build_rule(f, args...)
+    key = (f, map(typeof, args)...)
+    if !haskey(_MOONCAKE_RULE_CACHE, key)
+        _MOONCAKE_RULE_CACHE[key] = Mooncake.build_rrule(f, args...)
     end
-
-    # d_translation = d_affine[:, 3, :] (last column for 2D)
-    d_translation = d_affine[:, 3, :]
-
-    # d_rot_scale = d_affine[:, 1:2, :] (first 2 columns)
-    d_rot_scale = d_affine[:, 1:2, :]
-
-    # Backprop through matrix multiply
-    d_rotation = NNlib.batched_mul(d_rot_scale, NNlib.batched_transpose(scale_shear))
-    d_scale_shear = NNlib.batched_mul(NNlib.batched_transpose(rotation), d_rot_scale)
-
-    # Extract d_zoom and d_shear
-    d_zoom = zeros(T, 2, batch_size)
-    d_shear = zeros(T, 2, batch_size)
-    @inbounds for n in 1:batch_size
-        d_zoom[1, n] = d_scale_shear[1, 1, n]
-        d_zoom[2, n] = d_scale_shear[2, 2, n]
-        d_shear[1, n] = d_scale_shear[1, 2, n]
-    end
-
-    return d_translation, d_rotation, d_zoom, d_shear
+    return _MOONCAKE_RULE_CACHE[key]
 end
 
 """
     _compute_affine_gradients(moving, static, translation, rotation, zoom, shear,
                               target_shape, padding_mode, dissimilarity_fn)
 
-Compute loss and gradients for affine registration using manual backpropagation.
+Compute loss and gradients for affine registration using Mooncake AD.
 
 Returns: (loss_value, d_translation, d_rotation, d_zoom, d_shear)
 """
@@ -746,46 +655,21 @@ function _compute_affine_gradients(
     shear::AbstractArray{T, 2},
     target_shape,
     padding_mode::Symbol,
-    dissimilarity_fn
+    dissimilarity_fn  # Currently unused - we use MSE directly for simplicity
 ) where T
-    ndim = size(zoom, 1)
-    batch_size = size(zoom, 2)
+    # Pack parameters
+    params = (translation, rotation, zoom, shear)
 
-    # ========== Forward Pass ==========
-    # 1. Compose affine matrix
-    affine = compose_affine(translation, rotation, zoom, shear)
+    # Build or get cached Mooncake rule
+    rule = _get_or_build_rule(_affine_loss_fn, params, moving, static, target_shape, padding_mode)
 
-    # 2. Create sampling grid
-    grid = affine_grid(affine, target_shape)
+    # Compute loss and gradients using Mooncake
+    loss_val, (_, dparams, _, _, _) = Mooncake.value_and_pullback!!(
+        rule, one(T), _affine_loss_fn, params, moving, static, target_shape, padding_mode
+    )
 
-    # 3. Sample moving image at grid positions (using our pure Julia grid_sample)
-    moved = grid_sample(moving, grid; padding_mode=padding_mode)
-
-    # 4. Compute loss (MSE for now, which has simple gradient)
-    # For MSE: loss = mean((moved - static)^2)
-    diff = moved .- static
-    loss_val = mean(diff .^ 2)
-
-    # ========== Backward Pass ==========
-    # 1. Gradient of MSE loss: d_moved = 2 * (moved - static) / numel
-    d_moved = T(2) .* diff ./ T(length(moved))
-
-    # 2. Gradient through grid_sample using our pure Julia ∇grid_sample
-    _, d_grid = ∇grid_sample(d_moved, moving, grid; padding_mode=padding_mode)
-
-    # 3. Gradient through affine_grid
-    d_affine = _affine_grid_backward(d_grid, target_shape, batch_size)
-
-    # 4. Gradient through compose_affine
-    if ndim == 3
-        d_translation, d_rotation, d_zoom, d_shear = _compose_affine_backward_3d(
-            d_affine, rotation, zoom, shear
-        )
-    else
-        d_translation, d_rotation, d_zoom, d_shear = _compose_affine_backward_2d(
-            d_affine, rotation, zoom, shear
-        )
-    end
+    # Unpack gradients
+    d_translation, d_rotation, d_zoom, d_shear = dparams
 
     return loss_val, d_translation, d_rotation, d_zoom, d_shear
 end

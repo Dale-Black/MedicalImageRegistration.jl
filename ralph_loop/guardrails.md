@@ -89,35 +89,70 @@ function torch_to_julia(arr::AbstractArray{T, 5}) where T  # 3D
 end
 ```
 
-## NNlib.grid_sample Usage
+## Grid Sample Implementation (CRITICAL)
 
-### Signature
-```julia
-NNlib.grid_sample(input, grid; padding_mode=:zeros)
-```
+### DO NOT USE NNlib.grid_sample
+
+NNlib.grid_sample uses threading internally which **breaks ALL Julia AD systems** (Enzyme, Mooncake, Zygote). This is unacceptable.
+
+### REQUIRED: Pure Julia grid_sample
+
+Write our own grid_sample in `src/grid_sample.jl` that:
+1. Is pure Julia with NO threading
+2. Matches PyTorch F.grid_sample output exactly
+3. Works with Mooncake AD (no special handling needed for pure Julia)
+4. Can be accelerated with AcceleratedKernels.jl
 
 ### Grid Format
-- Grid should have shape matching input spatial dims
 - Grid values in range [-1, 1] for normalized coordinates
-- `padding_mode` options: `:zeros`, `:border`, `:reflection`
+- `padding_mode` options: `:zeros`, `:border`
+- Support both 2D (bilinear) and 3D (trilinear) interpolation
 
-### Differences from PyTorch
-- Check `align_corners` behavior carefully
-- May need to handle batch dimension differently
+### MUST use AcceleratedKernels.jl
+
+grid_sample is THE performance bottleneck. For a 256³ volume:
+- 16+ million interpolations per call
+- Called thousands of times during registration
+- Nested loops = unacceptable performance
+
+Use AK.jl from the start:
+```julia
+using AcceleratedKernels
+
+function grid_sample(input, grid; padding_mode=:zeros)
+    output = similar(input, output_size...)
+
+    # Use AK.foreachindex for GPU-accelerated parallel iteration
+    AK.foreachindex(output) do I
+        # Interpolation logic here - runs on GPU if input is on GPU
+    end
+
+    return output
+end
+```
+
+### Verification
+```julia
+# Must match PyTorch within rtol=1e-5
+torch_result = F.grid_sample(input, grid, mode='bilinear', padding_mode='border')
+julia_result = grid_sample(input, grid; padding_mode=:border)
+@test isapprox(julia_result, torch_result, rtol=1e-5)
+
+# Must be fast on GPU
+@btime grid_sample($gpu_input, $gpu_grid)  # Should show GPU speedup
+```
 
 ## Automatic Differentiation (CRITICAL)
 
-### REQUIRED: Use Enzyme.jl or Mooncake.jl
+### REQUIRED: Use Mooncake.jl
 
-**DO NOT USE ZYGOTE.JL** - This is a hard requirement.
+**PROHIBITED:**
+- Zygote.jl - not compatible with project requirements
+- Manual gradients - unacceptable hack, makes code unmaintainable
 
-The project MUST use either Enzyme.jl or Mooncake.jl for all gradient computations. Zygote.jl is NOT compatible with project requirements.
+**REQUIRED:** Mooncake.jl for ALL gradient computations.
 
-**Which one to use?** See RESEARCH-AD-001 story - the ralph loop will evaluate both and choose the best option based on:
-- Compatibility with NNlib.grid_sample
-- Performance on our specific use case
-- Stability and ease of use
-- Error messages and debuggability
+Since we write our own pure Julia grid_sample (no NNlib), Mooncake works perfectly on our code. No special handling needed - just write clean Julia and Mooncake differentiates it.
 
 ### Enzyme.jl Basic Pattern
 ```julia
