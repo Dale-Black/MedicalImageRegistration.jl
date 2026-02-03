@@ -3,6 +3,7 @@ module MedicalImageRegistration
 # Dependencies
 using NNlib
 using Optimisers
+using Statistics
 
 # Core types and utilities
 include("types.jl")

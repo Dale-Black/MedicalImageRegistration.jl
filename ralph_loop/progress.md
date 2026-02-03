@@ -1054,3 +1054,58 @@ All acceptance criteria met:
 4. Optimisers.jl uses immutable update pattern: `state, params = update(state, params, grads)`
 
 ---
+
+## [IMPL-METRICS-001] Implement Dice loss and score
+
+**Date**: 2026-02-03
+
+**Status**: DONE
+
+### Implementation Summary
+
+Implemented `dice_score` and `dice_loss` functions in `src/metrics.jl`.
+
+#### Functions Implemented
+
+1. **`dice_score(x1, x2)`**
+   - Computes Dice coefficient: `2|A∩B| / (|A| + |B|)`
+   - For soft masks: intersection = sum(x1 * x2), union = sum(x1) + sum(x2)
+   - Sums over spatial dimensions only (2D: dims 1,2; 3D: dims 1,2,3)
+   - Averages over batch and channel dimensions
+   - Returns scalar in [0, 1]
+
+2. **`dice_loss(x1, x2)`**
+   - Simply returns `1 - dice_score(x1, x2)`
+   - Suitable for minimization during training
+
+#### Key Implementation Details
+
+```julia
+function dice_score(x1::AbstractArray{T, N}, x2::AbstractArray{T, N}) where {T, N}
+    spatial_dims = N == 4 ? (1, 2) : (1, 2, 3)  # 2D vs 3D
+    inter = sum(x1 .* x2; dims=spatial_dims)
+    union_sum = sum(x1 .+ x2; dims=spatial_dims)
+    dice = T(2) .* inter ./ union_sum
+    return mean(dice)
+end
+```
+
+#### Dependencies Added
+
+- Added `Statistics` to Project.toml and MedicalImageRegistration.jl for `mean()` function
+
+#### Parity Test Results
+
+All parity tests pass with torchreg within rtol=1e-5:
+- 2D arrays (X, Y, C, N)
+- 3D arrays (X, Y, Z, C, N)
+- Batch sizes 1, 2, 3
+
+### Acceptance Criteria Verification
+
+- ✅ dice_score returns value in [0, 1]
+- ✅ dice_loss = 1 - dice_score
+- ✅ Works for both 2D and 3D arrays
+- ✅ Handles batch dimension correctly
+
+---

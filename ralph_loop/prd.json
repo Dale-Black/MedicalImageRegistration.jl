@@ -155,7 +155,7 @@
       "id": "IMPL-METRICS-001",
       "type": "IMPL",
       "title": "Implement Dice loss and score",
-      "status": "open",
+      "status": "done",
       "priority": 5,
       "blockedBy": ["TEST-UTILS-001"],
       "description": "Implement dice_score(x1, x2) and dice_loss(x1, x2) in src/metrics.jl. Dice coefficient measures overlap between two binary/soft masks.",
