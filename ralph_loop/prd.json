@@ -707,7 +707,7 @@
       "id": "FIX-NOTEBOOK-001",
       "type": "IMPL",
       "title": "Fix cardiac_ct.jl notebook with working registration",
-      "status": "pending",
+      "status": "done",
       "priority": 31,
       "blockedBy": ["IMPL-REGISTER-PIPELINE-001"],
       "description": "Update the cardiac_ct.jl notebook to use the fixed registration pipeline. The current notebook shows registration FAILING (before/after nearly identical). After this fix, the notebook should show clear improvement in alignment. Add diagnostic cells to show what preprocessing is doing.",

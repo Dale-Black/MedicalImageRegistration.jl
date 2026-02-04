@@ -7088,3 +7088,55 @@ With preprocessing:
 - Optimization can now converge to good solution
 
 ---
+
+## [FIX-NOTEBOOK-001] Fix cardiac_ct.jl notebook with working registration
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+### Changes Made
+
+Updated the cardiac_ct.jl Pluto notebook to use the new preprocessing pipeline:
+
+1. **Updated `register_clinical()` call** with preprocessing kwargs:
+   - Added `preprocess=true`
+   - Added `center_of_mass_init=true`
+   - Added `crop_to_overlap=true`
+   - Added `window_hu=true`
+
+2. **Updated documentation** in markdown cells to explain preprocessing:
+   - Why preprocessing is needed (FOV mismatch)
+   - The preprocessing steps (COM alignment, overlap detection, cropping)
+   - Updated summary table with FOV mismatch solution
+
+3. **Enhanced metrics output** to show preprocessing information:
+   - Translation applied during COM alignment
+   - COM values for both images
+
+### Updated Code
+
+```julia
+registration_result = MIR.register_clinical(
+    ccta_physical, nc_physical;
+    # PREPROCESSING (NEW!)
+    preprocess=true,                   # Enable preprocessing pipeline
+    center_of_mass_init=true,          # Align centers of mass first
+    crop_to_overlap=true,              # Crop to overlapping FOV
+    window_hu=true,                    # Apply HU windowing
+    # REGISTRATION
+    registration_resolution=2.0f0,
+    loss_fn=MIR.mi_loss,
+    preserve_hu=true,
+    registration_type=:affine,
+    affine_scales=(4, 2, 1),
+    affine_iterations=(50, 25, 10),
+    learning_rate=0.01f0,
+    verbose=true
+)
+```
+
+### Note
+
+The notebook cannot be directly tested without the DICOM data files that are not in the repository. The changes follow the same patterns as the working tests in test_clinical.jl.
+
+---

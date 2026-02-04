@@ -4,6 +4,18 @@
 using Markdown
 using InteractiveUtils
 
+# This Pluto notebook uses @bind for interactivity. When running this notebook outside of Pluto, the following 'mock version' of @bind gives bound variables a default value (instead of an error).
+macro bind(def, element)
+    #! format: off
+    return quote
+        local iv = try Base.loaded_modules[Base.PkgId(Base.UUID("6e696c72-6542-2067-7265-42206c756150"), "AbstractPlutoDingetjes")].Bonds.initial_value catch; b -> missing; end
+        local el = $(esc(element))
+        global $(esc(def)) = Core.applicable(Base.get, el) ? Base.get(el) : iv(el)
+        el
+    end
+    #! format: on
+end
+
 # ╔═╡ a987dd55-059d-4a21-9bcc-9440b1899ed1
 begin
 	import Pkg
@@ -328,14 +340,26 @@ end
 
 # ╔═╡ 1d6e7f8c-9a0b-4c1d-2e3f-4a5b6c7d8e9f
 md"""
-## Registration with Mutual Information
+## Registration with Preprocessing + Mutual Information
 
-Now we run the clinical registration workflow:
+Now we run the clinical registration workflow with **preprocessing enabled**:
 
-1. **Resample to common resolution** (2mm isotropic for speed)
-2. **Register with MI loss** (handles contrast vs non-contrast intensity difference)
-3. **Upsample transform** to original high resolution
-4. **Apply with nearest-neighbor** to preserve exact HU values
+**Preprocessing steps (critical for FOV mismatch!):**
+1. **Compute centers of mass** for both images
+2. **Align COMs** - translate images so hearts are roughly aligned
+3. **Detect overlapping FOV** - find where both images cover
+4. **Crop to overlap** - focus registration on shared region
+5. **Resample to common resolution** (2mm isotropic for speed)
+
+**Registration steps:**
+6. **Register with MI loss** (handles contrast vs non-contrast intensity difference)
+7. **Upsample transform** to original high resolution
+8. **Apply to ORIGINAL image with nearest-neighbor** to preserve exact HU values
+
+**Why Preprocessing?**
+- CCTA has tight FOV (heart only), non-contrast has wide FOV (whole chest)
+- Without COM alignment, optimization starts far from solution
+- Gradient descent cannot escape local minimum when grossly misaligned
 
 **Why Mutual Information (MI)?**
 - Blood in non-contrast: ~40 HU
@@ -344,6 +368,7 @@ Now we run the clinical registration workflow:
 - MI measures statistical dependence - learns that 40 HU ↔ 300 HU
 
 **Note:** Registration parameters can be adjusted:
+- `preprocess`: Set to `true` (default) for FOV mismatch handling
 - `registration_resolution`: Lower = faster but less accurate
 - `affine_iterations`: More iterations = better alignment but slower
 - `preserve_hu`: Set to `true` for quantitative analysis (calcium scoring, dose calc)
@@ -359,6 +384,12 @@ begin
 
 	registration_result = MIR.register_clinical(
 		ccta_physical, nc_physical;
+		# PREPROCESSING (NEW!)
+		preprocess=true,                   # Enable preprocessing pipeline
+		center_of_mass_init=true,          # Align centers of mass first
+		crop_to_overlap=true,              # Crop to overlapping FOV
+		window_hu=true,                    # Apply HU windowing
+		# REGISTRATION
 		registration_resolution=2.0f0,    # 2mm isotropic for optimization
 		loss_fn=MIR.mi_loss,              # Mutual Information for contrast mismatch
 		preserve_hu=true,                  # Nearest-neighbor final interpolation
@@ -396,6 +427,19 @@ let
 	println("  Static spacing: $(registration_result.metadata[:static_spacing]) mm")
 	println("  Registration resolution: $(registration_result.metadata[:registration_resolution]) mm")
 	println("  Preserve HU: $(registration_result.metadata[:preserve_hu])")
+	println()
+	# Show preprocessing information if available
+	if haskey(registration_result.metadata, :preprocess_translation)
+		println("Preprocessing Applied:")
+		trans = registration_result.metadata[:preprocess_translation]
+		println("  Translation: ($(round(trans[1], digits=1)), $(round(trans[2], digits=1)), $(round(trans[3], digits=1))) mm")
+		if haskey(registration_result.metadata, :preprocess_com_moving)
+			com_m = registration_result.metadata[:preprocess_com_moving]
+			com_s = registration_result.metadata[:preprocess_com_static]
+			println("  COM Moving (CCTA): ($(round(com_m[1], digits=1)), $(round(com_m[2], digits=1)), $(round(com_m[3], digits=1))) mm")
+			println("  COM Static (NC):   ($(round(com_s[1], digits=1)), $(round(com_s[2], digits=1)), $(round(com_s[3], digits=1))) mm")
+		end
+	end
 	println("=" ^ 60)
 end
 
@@ -545,7 +589,7 @@ Browse through different slices to inspect the registration quality throughout t
 """
 
 # ╔═╡ 1b6c7d8e-9f0a-1b2c-3d4e-5f6a7b8c9d0e
-@bind slice_idx UI.Slider(1:nc_data.size_voxels[3], default=nc_data.size_voxels[3]÷2, show_value=true)
+@bind slice_idx UI.Slider(1:nc_data.size_voxels[3], default=44, show_value=true)
 
 # ╔═╡ 2c7d8e9f-0a1b-2c3d-4e5f-6a7b8c9d0e1f
 let
@@ -598,10 +642,10 @@ This notebook demonstrated the complete clinical CT registration workflow:
 
 | Challenge | Solution |
 |-----------|----------|
+| **FOV mismatch** (tight CCTA vs wide chest FOV) | `preprocess=true` with COM alignment |
 | **Resolution mismatch** (3mm vs 0.5mm) | Register at common resolution (2mm), upsample transform |
 | **Contrast intensity difference** (40 HU vs 300 HU blood) | Mutual Information loss |
 | **HU preservation for quantitative analysis** | `preserve_hu=true` (nearest-neighbor) |
-| **FOV mismatch** | Automatic handling via PhysicalImage |
 
 ### When to Use Different Settings
 
@@ -655,8 +699,8 @@ This notebook demonstrated the complete clinical CT registration workflow:
 # ╠═6c1d2e3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f
 # ╟─7d2e3f4a-5b6c-7d8e-9f0a-1b2c3d4e5f6a
 # ╠═8e3f4a5b-6c7d-8e9f-0a1b-2c3d4e5f6a7b
-# ╠═9f4a5b6c-7d8e-9f0a-1b2c-3d4e5f6a7b8c
+# ╟─9f4a5b6c-7d8e-9f0a-1b2c-3d4e5f6a7b8c
 # ╟─0a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d
-# ╠═1b6c7d8e-9f0a-1b2c-3d4e-5f6a7b8c9d0e
-# ╠═2c7d8e9f-0a1b-2c3d-4e5f-6a7b8c9d0e1f
+# ╟─1b6c7d8e-9f0a-1b2c-3d4e-5f6a7b8c9d0e
+# ╟─2c7d8e9f-0a1b-2c3d-4e5f-6a7b8c9d0e1f
 # ╟─3d8e9f0a-1b2c-3d4e-5f6a-7b8c9d0e1f2a
