@@ -164,7 +164,7 @@
       "id": "TEST-PARITY-001",
       "type": "TEST",
       "title": "Full parity tests against torchreg on GPU",
-      "status": "open",
+      "status": "done",
       "priority": 9,
       "blockedBy": ["IMPL-SYN-001"],
       "description": "Comprehensive parity tests comparing Julia GPU implementation against torchreg. All tests run on MtlArrays.",

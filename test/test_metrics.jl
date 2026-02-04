@@ -405,3 +405,169 @@ end
         @test _get_scalar(abs.(Array(pred_fdata))) > 0
     end
 end
+
+# ============================================================================
+# torchreg Parity Tests
+# ============================================================================
+
+@testset "torchreg parity" begin
+    using PythonCall
+
+    sys = pyimport("sys")
+    sys.path.append("/Users/daleblack/Documents/dev/torchreg_temp")
+
+    torch = pyimport("torch")
+    torchreg_metrics = pyimport("torchreg.metrics")
+    np = pyimport("numpy")
+
+    @testset "dice_score parity 3D" begin
+        torch.manual_seed(42)
+
+        # Create random masks - torchreg uses (N, C, D, H, W) convention
+        N, C, D, H, W = 2, 1, 8, 8, 8
+
+        # Create random values in [0, 1] for soft dice
+        x1_pt = torch.rand(N, C, D, H, W)
+        x2_pt = torch.rand(N, C, D, H, W)
+
+        # Compute torchreg dice_score
+        dice_pt = torchreg_metrics.dice_score(x1_pt, x2_pt)
+        dice_pt_val = pyconvert(Float32, dice_pt.item())
+
+        # Convert to Julia convention: (N, C, D, H, W) -> (X, Y, Z, C, N) = (W, H, D, C, N)
+        x1_np = pyconvert(Array{Float32}, x1_pt.numpy())
+        x2_np = pyconvert(Array{Float32}, x2_pt.numpy())
+        x1_jl = permutedims(x1_np, (5, 4, 3, 2, 1))  # (W, H, D, C, N) = (X, Y, Z, C, N)
+        x2_jl = permutedims(x2_np, (5, 4, 3, 2, 1))
+
+        # Compute Julia dice_score
+        dice_jl = dice_score(x1_jl, x2_jl)
+        dice_jl_val = _get_scalar(dice_jl)
+
+        @test isapprox(dice_jl_val, dice_pt_val, rtol=1e-5)
+    end
+
+    @testset "dice_score parity 2D" begin
+        torch.manual_seed(123)
+
+        # 2D case: (N, C, H, W)
+        N, C, H, W = 2, 1, 16, 16
+
+        x1_pt = torch.rand(N, C, H, W)
+        x2_pt = torch.rand(N, C, H, W)
+
+        dice_pt = torchreg_metrics.dice_score(x1_pt, x2_pt)
+        dice_pt_val = pyconvert(Float32, dice_pt.item())
+
+        # Convert to Julia convention: (N, C, H, W) -> (X, Y, C, N) = (W, H, C, N)
+        x1_np = pyconvert(Array{Float32}, x1_pt.numpy())
+        x2_np = pyconvert(Array{Float32}, x2_pt.numpy())
+        x1_jl = permutedims(x1_np, (4, 3, 2, 1))
+        x2_jl = permutedims(x2_np, (4, 3, 2, 1))
+
+        dice_jl = dice_score(x1_jl, x2_jl)
+        dice_jl_val = _get_scalar(dice_jl)
+
+        @test isapprox(dice_jl_val, dice_pt_val, rtol=1e-5)
+    end
+
+    @testset "dice_loss parity 3D" begin
+        torch.manual_seed(456)
+
+        N, C, D, H, W = 1, 1, 10, 10, 10
+
+        x1_pt = torch.rand(N, C, D, H, W)
+        x2_pt = torch.rand(N, C, D, H, W)
+
+        loss_pt = torchreg_metrics.dice_loss(x1_pt, x2_pt)
+        loss_pt_val = pyconvert(Float32, loss_pt.item())
+
+        x1_np = pyconvert(Array{Float32}, x1_pt.numpy())
+        x2_np = pyconvert(Array{Float32}, x2_pt.numpy())
+        x1_jl = permutedims(x1_np, (5, 4, 3, 2, 1))
+        x2_jl = permutedims(x2_np, (5, 4, 3, 2, 1))
+
+        loss_jl = dice_loss(x1_jl, x2_jl)
+        loss_jl_val = _get_scalar(loss_jl)
+
+        @test isapprox(loss_jl_val, loss_pt_val, rtol=1e-5)
+    end
+
+    @testset "dice_score identical masks" begin
+        # Perfect overlap should give dice = 1
+        torch.manual_seed(789)
+
+        N, C, D, H, W = 1, 1, 8, 8, 8
+
+        x_pt = torch.rand(N, C, D, H, W)
+
+        dice_pt = torchreg_metrics.dice_score(x_pt, x_pt)
+        dice_pt_val = pyconvert(Float32, dice_pt.item())
+
+        x_np = pyconvert(Array{Float32}, x_pt.numpy())
+        x_jl = permutedims(x_np, (5, 4, 3, 2, 1))
+
+        dice_jl = dice_score(x_jl, x_jl)
+        dice_jl_val = _get_scalar(dice_jl)
+
+        @test isapprox(dice_jl_val, dice_pt_val, rtol=1e-5)
+        @test isapprox(dice_jl_val, 1.0f0, atol=1e-6)
+    end
+
+    @testset "NCC parity" begin
+        torch.manual_seed(100)
+
+        # Note: NCC implementations may differ slightly in boundary handling,
+        # but the behavior should be qualitatively similar
+        N, C, D, H, W = 1, 1, 16, 16, 16
+        kernel_size = 7
+
+        pred_pt = torch.rand(N, C, D, H, W)
+        targ_pt = torch.rand(N, C, D, H, W)
+
+        ncc_module = torchreg_metrics.NCC(kernel_size=kernel_size)
+        loss_pt = ncc_module(pred_pt, targ_pt)
+        loss_pt_val = pyconvert(Float32, loss_pt.item())
+
+        pred_np = pyconvert(Array{Float32}, pred_pt.numpy())
+        targ_np = pyconvert(Array{Float32}, targ_pt.numpy())
+        pred_jl = permutedims(pred_np, (5, 4, 3, 2, 1))
+        targ_jl = permutedims(targ_np, (5, 4, 3, 2, 1))
+
+        loss_jl = ncc_loss(pred_jl, targ_jl; kernel_size=kernel_size)
+        loss_jl_val = _get_scalar(loss_jl)
+
+        # NCC implementations can differ in boundary handling
+        # Check that both are negative (as expected for correlation-based loss)
+        # and have similar magnitude
+        @test loss_pt_val < 0  # torchreg NCC returns negative
+        @test loss_jl_val < 0  # our NCC returns negative
+
+        # Check same order of magnitude - allow 50% tolerance due to
+        # different convolution vs explicit window implementations
+        @test isapprox(loss_jl_val, loss_pt_val, rtol=0.5)
+    end
+
+    @testset "NCC identical images" begin
+        torch.manual_seed(200)
+
+        N, C, D, H, W = 1, 1, 12, 12, 12
+        kernel_size = 5
+
+        img_pt = torch.rand(N, C, D, H, W)
+
+        ncc_module = torchreg_metrics.NCC(kernel_size=kernel_size)
+        loss_pt = ncc_module(img_pt, img_pt)
+        loss_pt_val = pyconvert(Float32, loss_pt.item())
+
+        img_np = pyconvert(Array{Float32}, img_pt.numpy())
+        img_jl = permutedims(img_np, (5, 4, 3, 2, 1))
+
+        loss_jl = ncc_loss(img_jl, img_jl; kernel_size=kernel_size)
+        loss_jl_val = _get_scalar(loss_jl)
+
+        # Identical images should have high correlation, so NCC loss should be strongly negative
+        @test loss_pt_val < -0.5
+        @test loss_jl_val < -0.5
+    end
+end

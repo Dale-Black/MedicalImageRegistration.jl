@@ -252,6 +252,18 @@ end
 # torchreg Parity Tests
 # ============================================================================
 
+# Only run torchreg parity tests if torchreg is available
+const _torchreg_available = try
+    using PythonCall
+    sys = pyimport("sys")
+    sys.path.append("/Users/daleblack/Documents/dev/torchreg_temp")
+    pyimport("torchreg.affine")
+    true
+catch
+    false
+end
+
+if _torchreg_available
 @testset "torchreg parity" begin
     using PythonCall
 
@@ -312,4 +324,7 @@ end
 
         @test isapprox(theta_pt_arr, theta_jl_pt; rtol=1e-5)
     end
+end
+else
+    @info "Skipping torchreg parity tests for compose_affine - torchreg not available"
 end
