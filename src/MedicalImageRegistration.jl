@@ -12,8 +12,10 @@ using Atomix
 
 # Core operations
 include("grid_sample.jl")
+include("affine_grid.jl")
 
 # Exports
 export grid_sample
+export affine_grid
 
 end # module
