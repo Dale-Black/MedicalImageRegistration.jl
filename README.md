@@ -182,6 +182,36 @@ moved_nearest = transform(reg, moving_ct; interpolation=:nearest)
 
 This ensures the registration converges properly (smooth gradients) while the final result preserves exact intensity values (no interpolation artifacts).
 
+### Shepp-Logan Phantom Demo: Standard vs HU-Preserving
+
+The following demo compares standard bilinear interpolation with HU-preserving nearest-neighbor mode using the Shepp-Logan phantom:
+
+| Standard (Bilinear) | HU-Preserving (Nearest) |
+|---------------------|-------------------------|
+| ![Standard](examples/output/registration_standard.gif) | ![HU-Preserving](examples/output/registration_hu_preserving.gif) |
+
+**Quantitative Results:**
+
+| Metric | Standard (Bilinear) | HU-Preserving (Nearest) |
+|--------|---------------------|-------------------------|
+| New values created | 2559 | 0 |
+| All values from input | No | Yes |
+| Suitable for quantitative analysis | No | Yes |
+
+Run the demo yourself:
+
+```bash
+cd examples
+julia demo_hu_preservation.jl
+```
+
+This demo:
+1. Loads the Shepp-Logan phantom (256x256)
+2. Creates synthetic misalignment (translation, rotation, zoom)
+3. Runs registration with both interpolation modes
+4. Generates comparison GIFs and intensity histograms
+5. Prints quantitative analysis showing value preservation
+
 ## Array Conventions
 
 Julia uses column-major order. This package follows Julia conventions:
