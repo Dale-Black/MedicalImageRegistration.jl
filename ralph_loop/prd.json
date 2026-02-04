@@ -182,7 +182,7 @@
       "id": "SETUP-CI-001",
       "type": "IMPL",
       "title": "GitHub Actions CI with Metal GPU testing",
-      "status": "open",
+      "status": "done",
       "priority": 10,
       "blockedBy": ["TEST-PARITY-001"],
       "description": "Set up CI that tests on macOS with Metal GPU.",

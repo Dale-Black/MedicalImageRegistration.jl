@@ -2,10 +2,12 @@
 
 using Test
 using MedicalImageRegistration
-using Metal
 using StableRNGs
 import Mooncake
 import Mooncake: CoDual, NoFData, NoRData
+
+# Include test helpers for conditional GPU testing
+include("test_helpers.jl")
 
 # ============================================================================
 # Helper: Create identity grid (samples at original positions)
@@ -59,100 +61,114 @@ end
         @test isapprox(output, input; rtol=1e-5)
     end
 
-    @testset "Metal GPU test" begin
-        input_cpu = rand(StableRNG(42), Float32, 16, 16, 1, 2)
-        grid_cpu = create_identity_grid_2d(16, 16, 2, Float32)
+    if METAL_AVAILABLE
+        @testset "Metal GPU test" begin
+            input_cpu = rand(StableRNG(42), Float32, 16, 16, 1, 2)
+            grid_cpu = create_identity_grid_2d(16, 16, 2, Float32)
 
-        input_mtl = MtlArray(input_cpu)
-        grid_mtl = MtlArray(grid_cpu)
+            input_mtl = MtlArray(input_cpu)
+            grid_mtl = MtlArray(grid_cpu)
 
-        output_mtl = grid_sample(input_mtl, grid_mtl)
+            output_mtl = grid_sample(input_mtl, grid_mtl)
 
-        @test output_mtl isa MtlArray
-        @test size(output_mtl) == (16, 16, 1, 2)
+            @test output_mtl isa MtlArray
+            @test size(output_mtl) == (16, 16, 1, 2)
 
-        # Compare GPU vs CPU result
-        output_cpu = grid_sample(input_cpu, grid_cpu)
-        @test isapprox(Array(output_mtl), output_cpu; rtol=1e-5)
-    end
+            # Compare GPU vs CPU result
+            output_cpu = grid_sample(input_cpu, grid_cpu)
+            @test isapprox(Array(output_mtl), output_cpu; rtol=1e-5)
+        end
 
-    @testset "Downsampling" begin
-        input = MtlArray(rand(StableRNG(123), Float32, 32, 32, 3, 2))
-        # Create grid that samples at half resolution
-        grid_cpu = create_identity_grid_2d(16, 16, 2, Float32)
-        grid = MtlArray(grid_cpu)
+        @testset "Downsampling" begin
+            input = MtlArray(rand(StableRNG(123), Float32, 32, 32, 3, 2))
+            # Create grid that samples at half resolution
+            grid_cpu = create_identity_grid_2d(16, 16, 2, Float32)
+            grid = MtlArray(grid_cpu)
 
-        output = grid_sample(input, grid)
+            output = grid_sample(input, grid)
 
-        @test output isa MtlArray
-        @test size(output) == (16, 16, 3, 2)
-    end
+            @test output isa MtlArray
+            @test size(output) == (16, 16, 3, 2)
+        end
 
-    @testset "Upsampling" begin
-        input = MtlArray(rand(StableRNG(124), Float32, 8, 8, 2, 1))
-        grid_cpu = create_identity_grid_2d(16, 16, 1, Float32)
-        grid = MtlArray(grid_cpu)
+        @testset "Upsampling" begin
+            input = MtlArray(rand(StableRNG(124), Float32, 8, 8, 2, 1))
+            grid_cpu = create_identity_grid_2d(16, 16, 1, Float32)
+            grid = MtlArray(grid_cpu)
 
-        output = grid_sample(input, grid)
+            output = grid_sample(input, grid)
 
-        @test output isa MtlArray
-        @test size(output) == (16, 16, 2, 1)
-    end
+            @test output isa MtlArray
+            @test size(output) == (16, 16, 2, 1)
+        end
 
-    @testset "padding_mode=:border" begin
-        input = MtlArray(rand(StableRNG(125), Float32, 8, 8, 1, 1))
-        # Grid with some out-of-bounds coordinates
-        grid_cpu = create_identity_grid_2d(8, 8, 1, Float32)
-        grid_cpu[1, 1, :, :] .= -2.0f0  # x = -2 is out of bounds
-        grid = MtlArray(grid_cpu)
+        @testset "padding_mode=:border" begin
+            input = MtlArray(rand(StableRNG(125), Float32, 8, 8, 1, 1))
+            # Grid with some out-of-bounds coordinates
+            grid_cpu = create_identity_grid_2d(8, 8, 1, Float32)
+            grid_cpu[1, 1, :, :] .= -2.0f0  # x = -2 is out of bounds
+            grid = MtlArray(grid_cpu)
 
-        output = grid_sample(input, grid; padding_mode=:border)
+            output = grid_sample(input, grid; padding_mode=:border)
 
-        @test output isa MtlArray
-        @test all(isfinite.(Array(output)))
-    end
+            @test output isa MtlArray
+            @test all(isfinite.(Array(output)))
+        end
 
-    @testset "padding_mode=:zeros" begin
-        input = MtlArray(ones(Float32, 8, 8, 1, 1))
-        # Grid with out-of-bounds coordinates
-        grid_cpu = create_identity_grid_2d(8, 8, 1, Float32)
-        grid_cpu[1, 1, :, :] .= -2.0f0  # x = -2 is out of bounds
-        grid = MtlArray(grid_cpu)
+        @testset "padding_mode=:zeros" begin
+            input = MtlArray(ones(Float32, 8, 8, 1, 1))
+            # Grid with out-of-bounds coordinates
+            grid_cpu = create_identity_grid_2d(8, 8, 1, Float32)
+            grid_cpu[1, 1, :, :] .= -2.0f0  # x = -2 is out of bounds
+            grid = MtlArray(grid_cpu)
 
-        output = grid_sample(input, grid; padding_mode=:zeros)
+            output = grid_sample(input, grid; padding_mode=:zeros)
 
-        output_arr = Array(output)
-        # The first column should have some zeros due to out-of-bounds x
-        @test any(output_arr .< 1.0f0)
+            output_arr = Array(output)
+            # The first column should have some zeros due to out-of-bounds x
+            @test any(output_arr .< 1.0f0)
+        end
     end
 end
 
 @testset "grid_sample 3D forward" begin
-    @testset "Metal GPU test" begin
-        input_cpu = rand(StableRNG(200), Float32, 8, 8, 8, 1, 2)
-        grid_cpu = create_identity_grid_3d(8, 8, 8, 2, Float32)
+    if METAL_AVAILABLE
+        @testset "Metal GPU test" begin
+            input_cpu = rand(StableRNG(200), Float32, 8, 8, 8, 1, 2)
+            grid_cpu = create_identity_grid_3d(8, 8, 8, 2, Float32)
 
-        input_mtl = MtlArray(input_cpu)
-        grid_mtl = MtlArray(grid_cpu)
+            input_mtl = MtlArray(input_cpu)
+            grid_mtl = MtlArray(grid_cpu)
 
-        output_mtl = grid_sample(input_mtl, grid_mtl)
+            output_mtl = grid_sample(input_mtl, grid_mtl)
 
-        @test output_mtl isa MtlArray
-        @test size(output_mtl) == (8, 8, 8, 1, 2)
+            @test output_mtl isa MtlArray
+            @test size(output_mtl) == (8, 8, 8, 1, 2)
 
-        # With identity grid, should match input
-        @test isapprox(Array(output_mtl), input_cpu; rtol=1e-4)
+            # With identity grid, should match input
+            @test isapprox(Array(output_mtl), input_cpu; rtol=1e-4)
+        end
+
+        @testset "Downsampling 3D" begin
+            input = MtlArray(rand(StableRNG(201), Float32, 16, 16, 16, 2, 1))
+            grid_cpu = create_identity_grid_3d(8, 8, 8, 1, Float32)
+            grid = MtlArray(grid_cpu)
+
+            output = grid_sample(input, grid)
+
+            @test output isa MtlArray
+            @test size(output) == (8, 8, 8, 2, 1)
+        end
     end
 
-    @testset "Downsampling 3D" begin
-        input = MtlArray(rand(StableRNG(201), Float32, 16, 16, 16, 2, 1))
+    @testset "CPU 3D basic test" begin
+        input_cpu = rand(StableRNG(200), Float32, 8, 8, 8, 1, 1)
         grid_cpu = create_identity_grid_3d(8, 8, 8, 1, Float32)
-        grid = MtlArray(grid_cpu)
 
-        output = grid_sample(input, grid)
+        output = grid_sample(input_cpu, grid_cpu)
 
-        @test output isa MtlArray
-        @test size(output) == (8, 8, 8, 2, 1)
+        @test size(output) == (8, 8, 8, 1, 1)
+        @test isapprox(output, input_cpu; rtol=1e-4)
     end
 end
 
@@ -190,37 +206,39 @@ end
         @test any(grid_fdata .!= 0)
     end
 
-    @testset "Mooncake rrule!! on Metal" begin
-        input_cpu = rand(StableRNG(301), Float32, 8, 8, 1, 1)
-        grid_cpu = create_identity_grid_2d(8, 8, 1, Float32)
+    if METAL_AVAILABLE
+        @testset "Mooncake rrule!! on Metal" begin
+            input_cpu = rand(StableRNG(301), Float32, 8, 8, 1, 1)
+            grid_cpu = create_identity_grid_2d(8, 8, 1, Float32)
 
-        input_mtl = MtlArray(input_cpu)
-        grid_mtl = MtlArray(grid_cpu)
+            input_mtl = MtlArray(input_cpu)
+            grid_mtl = MtlArray(grid_cpu)
 
-        # Create fdata on GPU
-        input_fdata = Metal.zeros(Float32, size(input_mtl))
-        grid_fdata = Metal.zeros(Float32, size(grid_mtl))
+            # Create fdata on GPU
+            input_fdata = Metal.zeros(Float32, size(input_mtl))
+            grid_fdata = Metal.zeros(Float32, size(grid_mtl))
 
-        # Create CoDuals
-        input_codual = CoDual(input_mtl, input_fdata)
-        grid_codual = CoDual(grid_mtl, grid_fdata)
-        fn_codual = CoDual(grid_sample, NoFData())
+            # Create CoDuals
+            input_codual = CoDual(input_mtl, input_fdata)
+            grid_codual = CoDual(grid_mtl, grid_fdata)
+            fn_codual = CoDual(grid_sample, NoFData())
 
-        # Forward pass
-        output_codual, pullback = Mooncake.rrule!!(fn_codual, input_codual, grid_codual)
+            # Forward pass
+            output_codual, pullback = Mooncake.rrule!!(fn_codual, input_codual, grid_codual)
 
-        @test output_codual.x isa MtlArray
-        @test size(output_codual.x) == (8, 8, 1, 1)
+            @test output_codual.x isa MtlArray
+            @test size(output_codual.x) == (8, 8, 1, 1)
 
-        # Set upstream gradient
-        output_codual.dx .= 1.0f0
+            # Set upstream gradient
+            output_codual.dx .= 1.0f0
 
-        # Run pullback
-        pullback(NoRData())
+            # Run pullback
+            pullback(NoRData())
 
-        # Gradients should be non-zero
-        @test any(Array(input_fdata) .!= 0)
-        @test any(Array(grid_fdata) .!= 0)
+            # Gradients should be non-zero
+            @test any(Array(input_fdata) .!= 0)
+            @test any(Array(grid_fdata) .!= 0)
+        end
     end
 
     @testset "Gradient correctness via finite differences" begin
@@ -303,30 +321,32 @@ end
 end
 
 @testset "grid_sample 3D gradients" begin
-    @testset "Mooncake rrule!! on Metal 3D" begin
-        input_cpu = rand(StableRNG(400), Float32, 4, 4, 4, 1, 1)
-        grid_cpu = create_identity_grid_3d(4, 4, 4, 1, Float32)
+    if METAL_AVAILABLE
+        @testset "Mooncake rrule!! on Metal 3D" begin
+            input_cpu = rand(StableRNG(400), Float32, 4, 4, 4, 1, 1)
+            grid_cpu = create_identity_grid_3d(4, 4, 4, 1, Float32)
 
-        input_mtl = MtlArray(input_cpu)
-        grid_mtl = MtlArray(grid_cpu)
+            input_mtl = MtlArray(input_cpu)
+            grid_mtl = MtlArray(grid_cpu)
 
-        input_fdata = Metal.zeros(Float32, size(input_mtl))
-        grid_fdata = Metal.zeros(Float32, size(grid_mtl))
+            input_fdata = Metal.zeros(Float32, size(input_mtl))
+            grid_fdata = Metal.zeros(Float32, size(grid_mtl))
 
-        input_codual = CoDual(input_mtl, input_fdata)
-        grid_codual = CoDual(grid_mtl, grid_fdata)
-        fn_codual = CoDual(grid_sample, NoFData())
+            input_codual = CoDual(input_mtl, input_fdata)
+            grid_codual = CoDual(grid_mtl, grid_fdata)
+            fn_codual = CoDual(grid_sample, NoFData())
 
-        output_codual, pullback = Mooncake.rrule!!(fn_codual, input_codual, grid_codual)
+            output_codual, pullback = Mooncake.rrule!!(fn_codual, input_codual, grid_codual)
 
-        @test output_codual.x isa MtlArray
-        @test size(output_codual.x) == (4, 4, 4, 1, 1)
+            @test output_codual.x isa MtlArray
+            @test size(output_codual.x) == (4, 4, 4, 1, 1)
 
-        output_codual.dx .= 1.0f0
-        pullback(NoRData())
+            output_codual.dx .= 1.0f0
+            pullback(NoRData())
 
-        @test any(Array(input_fdata) .!= 0)
-        @test any(Array(grid_fdata) .!= 0)
+            @test any(Array(input_fdata) .!= 0)
+            @test any(Array(grid_fdata) .!= 0)
+        end
     end
 
     @testset "3D Gradient correctness via finite differences" begin

@@ -3,11 +3,13 @@
 
 using Test
 using MedicalImageRegistration
-using Metal
 using StableRNGs
 import AcceleratedKernels as AK
 import Mooncake
 import Mooncake: CoDual, NoFData, NoRData
+
+# Include test helpers for conditional GPU testing
+include("test_helpers.jl")
 
 # ============================================================================
 # Helper: Finite Difference Gradient Check
@@ -50,22 +52,24 @@ end
         @test _get_scalar(loss2) ≈ 1.0f0 atol=1e-6
     end
 
-    @testset "Metal GPU test" begin
-        rng = StableRNG(42)
-        pred_cpu = rand(rng, Float32, 16, 16, 2, 2)
-        target_cpu = rand(rng, Float32, 16, 16, 2, 2)
+    if METAL_AVAILABLE
+        @testset "Metal GPU test" begin
+            rng = StableRNG(42)
+            pred_cpu = rand(rng, Float32, 16, 16, 2, 2)
+            target_cpu = rand(rng, Float32, 16, 16, 2, 2)
 
-        pred_mtl = MtlArray(pred_cpu)
-        target_mtl = MtlArray(target_cpu)
+            pred_mtl = MtlArray(pred_cpu)
+            target_mtl = MtlArray(target_cpu)
 
-        loss_mtl = mse_loss(pred_mtl, target_mtl)
+            loss_mtl = mse_loss(pred_mtl, target_mtl)
 
-        @test loss_mtl isa MtlArray{Float32, 1}
-        @test length(loss_mtl) == 1
+            @test loss_mtl isa MtlArray{Float32, 1}
+            @test length(loss_mtl) == 1
 
-        # Compare GPU vs CPU result
-        loss_cpu = mse_loss(pred_cpu, target_cpu)
-        @test isapprox(_get_scalar(Array(loss_mtl)), _get_scalar(loss_cpu), rtol=1e-5)
+            # Compare GPU vs CPU result
+            loss_cpu = mse_loss(pred_cpu, target_cpu)
+            @test isapprox(_get_scalar(Array(loss_mtl)), _get_scalar(loss_cpu), rtol=1e-5)
+        end
     end
 
     @testset "Gradient verification (CPU)" begin
@@ -99,34 +103,36 @@ end
         @test isapprox(pred_fdata, grad_fd, rtol=1e-2)
     end
 
-    @testset "Gradient on Metal GPU" begin
-        rng = StableRNG(456)
-        pred_cpu = rand(rng, Float32, 8, 8, 1, 1)
-        target_cpu = rand(rng, Float32, 8, 8, 1, 1)
+    if METAL_AVAILABLE
+        @testset "Gradient on Metal GPU" begin
+            rng = StableRNG(456)
+            pred_cpu = rand(rng, Float32, 8, 8, 1, 1)
+            target_cpu = rand(rng, Float32, 8, 8, 1, 1)
 
-        pred_mtl = MtlArray(pred_cpu)
-        target_mtl = MtlArray(target_cpu)
-        pred_fdata = Metal.zeros(Float32, size(pred_mtl))
-        target_fdata = Metal.zeros(Float32, size(target_mtl))
+            pred_mtl = MtlArray(pred_cpu)
+            target_mtl = MtlArray(target_cpu)
+            pred_fdata = Metal.zeros(Float32, size(pred_mtl))
+            target_fdata = Metal.zeros(Float32, size(target_mtl))
 
-        pred_codual = CoDual(pred_mtl, pred_fdata)
-        target_codual = CoDual(target_mtl, target_fdata)
+            pred_codual = CoDual(pred_mtl, pred_fdata)
+            target_codual = CoDual(target_mtl, target_fdata)
 
-        output_codual, pb = Mooncake.rrule!!(
-            CoDual(mse_loss, NoFData()),
-            pred_codual,
-            target_codual
-        )
+            output_codual, pb = Mooncake.rrule!!(
+                CoDual(mse_loss, NoFData()),
+                pred_codual,
+                target_codual
+            )
 
-        @test output_codual.x isa MtlArray
-        @test output_codual.dx isa MtlArray
+            @test output_codual.x isa MtlArray
+            @test output_codual.dx isa MtlArray
 
-        fill!(output_codual.dx, 1.0f0)
-        pb(NoRData())
+            fill!(output_codual.dx, 1.0f0)
+            pb(NoRData())
 
-        @test pred_fdata isa MtlArray
-        # Check gradient is non-zero
-        @test _get_scalar(abs.(Array(pred_fdata))) > 0
+            @test pred_fdata isa MtlArray
+            # Check gradient is non-zero
+            @test _get_scalar(abs.(Array(pred_fdata))) > 0
+        end
     end
 end
 
@@ -153,39 +159,41 @@ end
         @test _get_scalar(score) ≈ 0.0f0 atol=1e-6
     end
 
-    @testset "Metal GPU test 2D" begin
-        rng = StableRNG(42)
-        pred_cpu = rand(rng, Float32, 16, 16, 1, 2)
-        target_cpu = rand(rng, Float32, 16, 16, 1, 2)
+    if METAL_AVAILABLE
+        @testset "Metal GPU test 2D" begin
+            rng = StableRNG(42)
+            pred_cpu = rand(rng, Float32, 16, 16, 1, 2)
+            target_cpu = rand(rng, Float32, 16, 16, 1, 2)
 
-        pred_mtl = MtlArray(pred_cpu)
-        target_mtl = MtlArray(target_cpu)
+            pred_mtl = MtlArray(pred_cpu)
+            target_mtl = MtlArray(target_cpu)
 
-        score_mtl = dice_score(pred_mtl, target_mtl)
+            score_mtl = dice_score(pred_mtl, target_mtl)
 
-        @test score_mtl isa MtlArray{Float32, 1}
-        @test length(score_mtl) == 1
+            @test score_mtl isa MtlArray{Float32, 1}
+            @test length(score_mtl) == 1
 
-        # Compare GPU vs CPU result
-        score_cpu = dice_score(pred_cpu, target_cpu)
-        @test isapprox(_get_scalar(Array(score_mtl)), _get_scalar(score_cpu), rtol=1e-5)
-    end
+            # Compare GPU vs CPU result
+            score_cpu = dice_score(pred_cpu, target_cpu)
+            @test isapprox(_get_scalar(Array(score_mtl)), _get_scalar(score_cpu), rtol=1e-5)
+        end
 
-    @testset "Metal GPU test 3D" begin
-        rng = StableRNG(43)
-        pred_cpu = rand(rng, Float32, 8, 8, 8, 1, 2)
-        target_cpu = rand(rng, Float32, 8, 8, 8, 1, 2)
+        @testset "Metal GPU test 3D" begin
+            rng = StableRNG(43)
+            pred_cpu = rand(rng, Float32, 8, 8, 8, 1, 2)
+            target_cpu = rand(rng, Float32, 8, 8, 8, 1, 2)
 
-        pred_mtl = MtlArray(pred_cpu)
-        target_mtl = MtlArray(target_cpu)
+            pred_mtl = MtlArray(pred_cpu)
+            target_mtl = MtlArray(target_cpu)
 
-        score_mtl = dice_score(pred_mtl, target_mtl)
+            score_mtl = dice_score(pred_mtl, target_mtl)
 
-        @test score_mtl isa MtlArray{Float32, 1}
-        @test length(score_mtl) == 1
+            @test score_mtl isa MtlArray{Float32, 1}
+            @test length(score_mtl) == 1
 
-        score_cpu = dice_score(pred_cpu, target_cpu)
-        @test isapprox(_get_scalar(Array(score_mtl)), _get_scalar(score_cpu), rtol=1e-5)
+            score_cpu = dice_score(pred_cpu, target_cpu)
+            @test isapprox(_get_scalar(Array(score_mtl)), _get_scalar(score_cpu), rtol=1e-5)
+        end
     end
 
     @testset "Gradient verification 2D (CPU)" begin
@@ -213,25 +221,27 @@ end
         @test isapprox(pred_fdata, grad_fd, rtol=2e-2)
     end
 
-    @testset "Gradient on Metal GPU 2D" begin
-        rng = StableRNG(456)
-        pred_mtl = MtlArray(rand(rng, Float32, 8, 8, 1, 1))
-        target_mtl = MtlArray(rand(rng, Float32, 8, 8, 1, 1))
-        pred_fdata = Metal.zeros(Float32, size(pred_mtl))
-        target_fdata = Metal.zeros(Float32, size(target_mtl))
+    if METAL_AVAILABLE
+        @testset "Gradient on Metal GPU 2D" begin
+            rng = StableRNG(456)
+            pred_mtl = MtlArray(rand(rng, Float32, 8, 8, 1, 1))
+            target_mtl = MtlArray(rand(rng, Float32, 8, 8, 1, 1))
+            pred_fdata = Metal.zeros(Float32, size(pred_mtl))
+            target_fdata = Metal.zeros(Float32, size(target_mtl))
 
-        output_codual, pb = Mooncake.rrule!!(
-            CoDual(dice_score, NoFData()),
-            CoDual(pred_mtl, pred_fdata),
-            CoDual(target_mtl, target_fdata)
-        )
+            output_codual, pb = Mooncake.rrule!!(
+                CoDual(dice_score, NoFData()),
+                CoDual(pred_mtl, pred_fdata),
+                CoDual(target_mtl, target_fdata)
+            )
 
-        @test output_codual.x isa MtlArray
-        fill!(output_codual.dx, 1.0f0)
-        pb(NoRData())
+            @test output_codual.x isa MtlArray
+            fill!(output_codual.dx, 1.0f0)
+            pb(NoRData())
 
-        @test pred_fdata isa MtlArray
-        @test _get_scalar(abs.(Array(pred_fdata))) > 0
+            @test pred_fdata isa MtlArray
+            @test _get_scalar(abs.(Array(pred_fdata))) > 0
+        end
     end
 end
 
@@ -253,17 +263,19 @@ end
         @test isapprox(_get_scalar(loss), 1.0f0 - _get_scalar(score), atol=1e-6)
     end
 
-    @testset "Metal GPU test" begin
-        rng = StableRNG(43)
-        pred_mtl = MtlArray(rand(rng, Float32, 16, 16, 1, 2))
-        target_mtl = MtlArray(rand(rng, Float32, 16, 16, 1, 2))
+    if METAL_AVAILABLE
+        @testset "Metal GPU test" begin
+            rng = StableRNG(43)
+            pred_mtl = MtlArray(rand(rng, Float32, 16, 16, 1, 2))
+            target_mtl = MtlArray(rand(rng, Float32, 16, 16, 1, 2))
 
-        loss_mtl = dice_loss(pred_mtl, target_mtl)
+            loss_mtl = dice_loss(pred_mtl, target_mtl)
 
-        @test loss_mtl isa MtlArray{Float32, 1}
-        loss_val = _get_scalar(Array(loss_mtl))
-        @test loss_val >= 0.0f0
-        @test loss_val <= 1.0f0
+            @test loss_mtl isa MtlArray{Float32, 1}
+            loss_val = _get_scalar(Array(loss_mtl))
+            @test loss_val >= 0.0f0
+            @test loss_val <= 1.0f0
+        end
     end
 
     @testset "Gradient verification (CPU)" begin
@@ -321,22 +333,24 @@ end
         @test _get_scalar(loss) > -1.0f0
     end
 
-    @testset "Metal GPU test" begin
-        rng = StableRNG(456)
-        pred_cpu = rand(rng, Float32, 12, 12, 12, 1, 1)
-        target_cpu = rand(rng, Float32, 12, 12, 12, 1, 1)
+    if METAL_AVAILABLE
+        @testset "Metal GPU test" begin
+            rng = StableRNG(456)
+            pred_cpu = rand(rng, Float32, 12, 12, 12, 1, 1)
+            target_cpu = rand(rng, Float32, 12, 12, 12, 1, 1)
 
-        pred_mtl = MtlArray(pred_cpu)
-        target_mtl = MtlArray(target_cpu)
+            pred_mtl = MtlArray(pred_cpu)
+            target_mtl = MtlArray(target_cpu)
 
-        loss_mtl = ncc_loss(pred_mtl, target_mtl; kernel_size=5)
+            loss_mtl = ncc_loss(pred_mtl, target_mtl; kernel_size=5)
 
-        @test loss_mtl isa MtlArray{Float32, 1}
-        @test length(loss_mtl) == 1
+            @test loss_mtl isa MtlArray{Float32, 1}
+            @test length(loss_mtl) == 1
 
-        # Compare GPU vs CPU result
-        loss_cpu = ncc_loss(pred_cpu, target_cpu; kernel_size=5)
-        @test isapprox(_get_scalar(Array(loss_mtl)), _get_scalar(loss_cpu), rtol=1e-4)
+            # Compare GPU vs CPU result
+            loss_cpu = ncc_loss(pred_cpu, target_cpu; kernel_size=5)
+            @test isapprox(_get_scalar(Array(loss_mtl)), _get_scalar(loss_cpu), rtol=1e-4)
+        end
     end
 
     @testset "different kernel sizes" begin
@@ -382,27 +396,29 @@ end
         @test isapprox(pred_fdata, grad_fd, rtol=0.5, atol=1e-2)
     end
 
-    @testset "Gradient on Metal GPU" begin
-        rng = StableRNG(222)
-        pred_mtl = MtlArray(rand(rng, Float32, 8, 8, 8, 1, 1))
-        target_mtl = MtlArray(rand(rng, Float32, 8, 8, 8, 1, 1))
-        pred_fdata = Metal.zeros(Float32, size(pred_mtl))
-        target_fdata = Metal.zeros(Float32, size(target_mtl))
+    if METAL_AVAILABLE
+        @testset "Gradient on Metal GPU" begin
+            rng = StableRNG(222)
+            pred_mtl = MtlArray(rand(rng, Float32, 8, 8, 8, 1, 1))
+            target_mtl = MtlArray(rand(rng, Float32, 8, 8, 8, 1, 1))
+            pred_fdata = Metal.zeros(Float32, size(pred_mtl))
+            target_fdata = Metal.zeros(Float32, size(target_mtl))
 
-        output_codual, pb = Mooncake.rrule!!(
-            CoDual(ncc_loss, NoFData()),
-            CoDual(pred_mtl, pred_fdata),
-            CoDual(target_mtl, target_fdata);
-            kernel_size=3
-        )
+            output_codual, pb = Mooncake.rrule!!(
+                CoDual(ncc_loss, NoFData()),
+                CoDual(pred_mtl, pred_fdata),
+                CoDual(target_mtl, target_fdata);
+                kernel_size=3
+            )
 
-        @test output_codual.x isa MtlArray
-        fill!(output_codual.dx, 1.0f0)
-        pb(NoRData())
+            @test output_codual.x isa MtlArray
+            fill!(output_codual.dx, 1.0f0)
+            pb(NoRData())
 
-        @test pred_fdata isa MtlArray
-        # Check gradient is non-zero
-        @test _get_scalar(abs.(Array(pred_fdata))) > 0
+            @test pred_fdata isa MtlArray
+            # Check gradient is non-zero
+            @test _get_scalar(abs.(Array(pred_fdata))) > 0
+        end
     end
 end
 

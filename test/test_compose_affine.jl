@@ -2,10 +2,12 @@
 
 using Test
 using MedicalImageRegistration
-using Metal
 using StableRNGs
 import Mooncake
 import Mooncake: CoDual, NoFData, NoRData
+
+# Include test helpers for conditional GPU testing
+include("test_helpers.jl")
 
 # ============================================================================
 # Basic Forward Pass Tests
@@ -57,16 +59,18 @@ import Mooncake: CoDual, NoFData, NoRData
         @test isapprox(theta[:, :, 1], Float32[1 0.5 0; 0 1 0]; rtol=1e-5)
     end
 
-    @testset "Metal GPU test" begin
-        translation = MtlArray(rand(StableRNG(100), Float32, 2, 2))
-        rotation = MtlArray(Float32.(cat(reshape([1 0; 0 1], 2, 2), reshape([1 0; 0 1], 2, 2), dims=3)))
-        zoom = MtlArray(ones(Float32, 2, 2))
-        shear = MtlArray(zeros(Float32, 2, 2))
+    if METAL_AVAILABLE
+        @testset "Metal GPU test" begin
+            translation = MtlArray(rand(StableRNG(100), Float32, 2, 2))
+            rotation = MtlArray(Float32.(cat(reshape([1 0; 0 1], 2, 2), reshape([1 0; 0 1], 2, 2), dims=3)))
+            zoom = MtlArray(ones(Float32, 2, 2))
+            shear = MtlArray(zeros(Float32, 2, 2))
 
-        theta = compose_affine(translation, rotation, zoom, shear)
+            theta = compose_affine(translation, rotation, zoom, shear)
 
-        @test theta isa MtlArray
-        @test size(theta) == (2, 3, 2)
+            @test theta isa MtlArray
+            @test size(theta) == (2, 3, 2)
+        end
     end
 end
 
@@ -109,16 +113,18 @@ end
         @test isapprox(theta[:, :, 1], expected; rtol=1e-5)
     end
 
-    @testset "Metal GPU test 3D" begin
-        translation = MtlArray(rand(StableRNG(200), Float32, 3, 1))
-        rotation = MtlArray(Float32.(reshape([1 0 0; 0 1 0; 0 0 1], 3, 3, 1)))
-        zoom = MtlArray(ones(Float32, 3, 1))
-        shear = MtlArray(zeros(Float32, 3, 1))
+    if METAL_AVAILABLE
+        @testset "Metal GPU test 3D" begin
+            translation = MtlArray(rand(StableRNG(200), Float32, 3, 1))
+            rotation = MtlArray(Float32.(reshape([1 0 0; 0 1 0; 0 0 1], 3, 3, 1)))
+            zoom = MtlArray(ones(Float32, 3, 1))
+            shear = MtlArray(zeros(Float32, 3, 1))
 
-        theta = compose_affine(translation, rotation, zoom, shear)
+            theta = compose_affine(translation, rotation, zoom, shear)
 
-        @test theta isa MtlArray
-        @test size(theta) == (3, 4, 1)
+            @test theta isa MtlArray
+            @test size(theta) == (3, 4, 1)
+        end
     end
 end
 
@@ -155,31 +161,33 @@ end
         @test isapprox(d_translation, ones(Float32, 2, 1); rtol=1e-5)
     end
 
-    @testset "Mooncake rrule!! on Metal" begin
-        translation = MtlArray(zeros(Float32, 2, 1))
-        rotation = MtlArray(Float32.(reshape([1 0; 0 1], 2, 2, 1)))
-        zoom = MtlArray(ones(Float32, 2, 1))
-        shear = MtlArray(zeros(Float32, 2, 1))
+    if METAL_AVAILABLE
+        @testset "Mooncake rrule!! on Metal" begin
+            translation = MtlArray(zeros(Float32, 2, 1))
+            rotation = MtlArray(Float32.(reshape([1 0; 0 1], 2, 2, 1)))
+            zoom = MtlArray(ones(Float32, 2, 1))
+            shear = MtlArray(zeros(Float32, 2, 1))
 
-        d_translation = Metal.zeros(Float32, 2, 1)
-        d_rotation = Metal.zeros(Float32, 2, 2, 1)
-        d_zoom = Metal.zeros(Float32, 2, 1)
-        d_shear = Metal.zeros(Float32, 2, 1)
+            d_translation = Metal.zeros(Float32, 2, 1)
+            d_rotation = Metal.zeros(Float32, 2, 2, 1)
+            d_zoom = Metal.zeros(Float32, 2, 1)
+            d_shear = Metal.zeros(Float32, 2, 1)
 
-        translation_codual = CoDual(translation, d_translation)
-        rotation_codual = CoDual(rotation, d_rotation)
-        zoom_codual = CoDual(zoom, d_zoom)
-        shear_codual = CoDual(shear, d_shear)
-        fn_codual = CoDual(compose_affine, NoFData())
+            translation_codual = CoDual(translation, d_translation)
+            rotation_codual = CoDual(rotation, d_rotation)
+            zoom_codual = CoDual(zoom, d_zoom)
+            shear_codual = CoDual(shear, d_shear)
+            fn_codual = CoDual(compose_affine, NoFData())
 
-        output_codual, pullback = Mooncake.rrule!!(fn_codual, translation_codual, rotation_codual, zoom_codual, shear_codual)
+            output_codual, pullback = Mooncake.rrule!!(fn_codual, translation_codual, rotation_codual, zoom_codual, shear_codual)
 
-        @test output_codual.x isa MtlArray
+            @test output_codual.x isa MtlArray
 
-        output_codual.dx .= 1.0f0
-        pullback(NoRData())
+            output_codual.dx .= 1.0f0
+            pullback(NoRData())
 
-        @test isapprox(Array(d_zoom), ones(Float32, 2, 1); rtol=1e-5)
+            @test isapprox(Array(d_zoom), ones(Float32, 2, 1); rtol=1e-5)
+        end
     end
 
     @testset "Gradient correctness via finite differences" begin
@@ -218,16 +226,47 @@ end
 end
 
 @testset "compose_affine 3D gradients" begin
-    @testset "Mooncake rrule!! on Metal 3D" begin
-        translation = MtlArray(zeros(Float32, 3, 1))
-        rotation = MtlArray(Float32.(reshape([1 0 0; 0 1 0; 0 0 1], 3, 3, 1)))
-        zoom = MtlArray(ones(Float32, 3, 1))
-        shear = MtlArray(zeros(Float32, 3, 1))
+    if METAL_AVAILABLE
+        @testset "Mooncake rrule!! on Metal 3D" begin
+            translation = MtlArray(zeros(Float32, 3, 1))
+            rotation = MtlArray(Float32.(reshape([1 0 0; 0 1 0; 0 0 1], 3, 3, 1)))
+            zoom = MtlArray(ones(Float32, 3, 1))
+            shear = MtlArray(zeros(Float32, 3, 1))
 
-        d_translation = Metal.zeros(Float32, 3, 1)
-        d_rotation = Metal.zeros(Float32, 3, 3, 1)
-        d_zoom = Metal.zeros(Float32, 3, 1)
-        d_shear = Metal.zeros(Float32, 3, 1)
+            d_translation = Metal.zeros(Float32, 3, 1)
+            d_rotation = Metal.zeros(Float32, 3, 3, 1)
+            d_zoom = Metal.zeros(Float32, 3, 1)
+            d_shear = Metal.zeros(Float32, 3, 1)
+
+            translation_codual = CoDual(translation, d_translation)
+            rotation_codual = CoDual(rotation, d_rotation)
+            zoom_codual = CoDual(zoom, d_zoom)
+            shear_codual = CoDual(shear, d_shear)
+            fn_codual = CoDual(compose_affine, NoFData())
+
+            output_codual, pullback = Mooncake.rrule!!(fn_codual, translation_codual, rotation_codual, zoom_codual, shear_codual)
+
+            @test output_codual.x isa MtlArray
+            @test size(output_codual.x) == (3, 4, 1)
+
+            output_codual.dx .= 1.0f0
+            pullback(NoRData())
+
+            # Translation gradients should be 1
+            @test isapprox(Array(d_translation), ones(Float32, 3, 1); rtol=1e-5)
+        end
+    end
+
+    @testset "Mooncake rrule!! on CPU 3D" begin
+        translation = zeros(Float32, 3, 1)
+        rotation = Float32.(reshape([1 0 0; 0 1 0; 0 0 1], 3, 3, 1))
+        zoom = ones(Float32, 3, 1)
+        shear = zeros(Float32, 3, 1)
+
+        d_translation = zeros(Float32, 3, 1)
+        d_rotation = zeros(Float32, 3, 3, 1)
+        d_zoom = zeros(Float32, 3, 1)
+        d_shear = zeros(Float32, 3, 1)
 
         translation_codual = CoDual(translation, d_translation)
         rotation_codual = CoDual(rotation, d_rotation)
@@ -237,14 +276,13 @@ end
 
         output_codual, pullback = Mooncake.rrule!!(fn_codual, translation_codual, rotation_codual, zoom_codual, shear_codual)
 
-        @test output_codual.x isa MtlArray
         @test size(output_codual.x) == (3, 4, 1)
 
         output_codual.dx .= 1.0f0
         pullback(NoRData())
 
         # Translation gradients should be 1
-        @test isapprox(Array(d_translation), ones(Float32, 3, 1); rtol=1e-5)
+        @test isapprox(d_translation, ones(Float32, 3, 1); rtol=1e-5)
     end
 end
 

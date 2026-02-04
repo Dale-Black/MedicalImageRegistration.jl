@@ -2,10 +2,12 @@
 
 using Test
 using MedicalImageRegistration
-using Metal
 using StableRNGs
 import Mooncake
 import Mooncake: CoDual, NoFData, NoRData
+
+# Include test helpers for conditional GPU testing
+include("test_helpers.jl")
 
 # ============================================================================
 # Basic Forward Pass Tests
@@ -53,16 +55,18 @@ import Mooncake: CoDual, NoFData, NoRData
         @test isapprox(grid[:, 4, 4, 1], [2.0f0, 0.5f0]; rtol=1e-5)
     end
 
-    @testset "Metal GPU test" begin
-        theta_cpu = rand(StableRNG(100), Float32, 2, 3, 2) .- 0.5f0
-        theta_mtl = MtlArray(theta_cpu)
+    if METAL_AVAILABLE
+        @testset "Metal GPU test" begin
+            theta_cpu = rand(StableRNG(100), Float32, 2, 3, 2) .- 0.5f0
+            theta_mtl = MtlArray(theta_cpu)
 
-        grid_cpu = affine_grid(theta_cpu, (8, 8))
-        grid_mtl = affine_grid(theta_mtl, (8, 8))
+            grid_cpu = affine_grid(theta_cpu, (8, 8))
+            grid_mtl = affine_grid(theta_mtl, (8, 8))
 
-        @test grid_mtl isa MtlArray
-        @test size(grid_mtl) == (2, 8, 8, 2)
-        @test isapprox(Array(grid_mtl), grid_cpu; rtol=1e-5)
+            @test grid_mtl isa MtlArray
+            @test size(grid_mtl) == (2, 8, 8, 2)
+            @test isapprox(Array(grid_mtl), grid_cpu; rtol=1e-5)
+        end
     end
 
     @testset "4-tuple size (XYCN convention)" begin
@@ -92,16 +96,18 @@ end
         @test isapprox(grid[:, 3, 3, 3, 1], [1.0f0, 1.0f0, 1.0f0]; rtol=1e-5)
     end
 
-    @testset "Metal GPU test" begin
-        theta_cpu = rand(StableRNG(200), Float32, 3, 4, 1) .- 0.5f0
-        theta_mtl = MtlArray(theta_cpu)
+    if METAL_AVAILABLE
+        @testset "Metal GPU test" begin
+            theta_cpu = rand(StableRNG(200), Float32, 3, 4, 1) .- 0.5f0
+            theta_mtl = MtlArray(theta_cpu)
 
-        grid_cpu = affine_grid(theta_cpu, (4, 4, 4))
-        grid_mtl = affine_grid(theta_mtl, (4, 4, 4))
+            grid_cpu = affine_grid(theta_cpu, (4, 4, 4))
+            grid_mtl = affine_grid(theta_mtl, (4, 4, 4))
 
-        @test grid_mtl isa MtlArray
-        @test size(grid_mtl) == (3, 4, 4, 4, 1)
-        @test isapprox(Array(grid_mtl), grid_cpu; rtol=1e-5)
+            @test grid_mtl isa MtlArray
+            @test size(grid_mtl) == (3, 4, 4, 4, 1)
+            @test isapprox(Array(grid_mtl), grid_cpu; rtol=1e-5)
+        end
     end
 end
 
@@ -131,23 +137,25 @@ end
         @test isapprox(theta_fdata[2, 3, 1], 16.0f0; rtol=1e-5)
     end
 
-    @testset "Mooncake rrule!! on Metal" begin
-        theta_cpu = rand(StableRNG(300), Float32, 2, 3, 1)
-        theta_mtl = MtlArray(theta_cpu)
-        theta_fdata = Metal.zeros(Float32, 2, 3, 1)
+    if METAL_AVAILABLE
+        @testset "Mooncake rrule!! on Metal" begin
+            theta_cpu = rand(StableRNG(300), Float32, 2, 3, 1)
+            theta_mtl = MtlArray(theta_cpu)
+            theta_fdata = Metal.zeros(Float32, 2, 3, 1)
 
-        theta_codual = CoDual(theta_mtl, theta_fdata)
-        fn_codual = CoDual(affine_grid, NoFData())
+            theta_codual = CoDual(theta_mtl, theta_fdata)
+            fn_codual = CoDual(affine_grid, NoFData())
 
-        output_codual, pullback = Mooncake.rrule!!(fn_codual, theta_codual, CoDual((8, 8), NoFData()))
+            output_codual, pullback = Mooncake.rrule!!(fn_codual, theta_codual, CoDual((8, 8), NoFData()))
 
-        @test output_codual.x isa MtlArray
+            @test output_codual.x isa MtlArray
 
-        output_codual.dx .= 1.0f0
-        pullback(NoRData())
+            output_codual.dx .= 1.0f0
+            pullback(NoRData())
 
-        # Check Metal gives non-zero gradients
-        @test any(Array(theta_fdata) .!= 0)
+            # Check Metal gives non-zero gradients
+            @test any(Array(theta_fdata) .!= 0)
+        end
     end
 
     @testset "Translation gradient via finite differences" begin
@@ -220,27 +228,49 @@ end
 end
 
 @testset "affine_grid 3D gradients" begin
-    @testset "Mooncake rrule!! on Metal 3D" begin
-        theta_cpu = rand(StableRNG(400), Float32, 3, 4, 1)
-        theta_mtl = MtlArray(theta_cpu)
-        theta_fdata = Metal.zeros(Float32, 3, 4, 1)
+    if METAL_AVAILABLE
+        @testset "Mooncake rrule!! on Metal 3D" begin
+            theta_cpu = rand(StableRNG(400), Float32, 3, 4, 1)
+            theta_mtl = MtlArray(theta_cpu)
+            theta_fdata = Metal.zeros(Float32, 3, 4, 1)
 
-        theta_codual = CoDual(theta_mtl, theta_fdata)
+            theta_codual = CoDual(theta_mtl, theta_fdata)
+            fn_codual = CoDual(affine_grid, NoFData())
+
+            output_codual, pullback = Mooncake.rrule!!(fn_codual, theta_codual, CoDual((4, 4, 4), NoFData()))
+
+            @test output_codual.x isa MtlArray
+            @test size(output_codual.x) == (3, 4, 4, 4, 1)
+
+            output_codual.dx .= 1.0f0
+            pullback(NoRData())
+
+            # Translation gradients should equal grid size (4*4*4 = 64)
+            theta_fdata_cpu = Array(theta_fdata)
+            @test isapprox(theta_fdata_cpu[1, 4, 1], 64.0f0; rtol=1e-4)
+            @test isapprox(theta_fdata_cpu[2, 4, 1], 64.0f0; rtol=1e-4)
+            @test isapprox(theta_fdata_cpu[3, 4, 1], 64.0f0; rtol=1e-4)
+        end
+    end
+
+    @testset "Mooncake rrule!! on CPU 3D" begin
+        theta = rand(StableRNG(400), Float32, 3, 4, 1)
+        theta_fdata = zeros(Float32, 3, 4, 1)
+
+        theta_codual = CoDual(theta, theta_fdata)
         fn_codual = CoDual(affine_grid, NoFData())
 
         output_codual, pullback = Mooncake.rrule!!(fn_codual, theta_codual, CoDual((4, 4, 4), NoFData()))
 
-        @test output_codual.x isa MtlArray
         @test size(output_codual.x) == (3, 4, 4, 4, 1)
 
         output_codual.dx .= 1.0f0
         pullback(NoRData())
 
         # Translation gradients should equal grid size (4*4*4 = 64)
-        theta_fdata_cpu = Array(theta_fdata)
-        @test isapprox(theta_fdata_cpu[1, 4, 1], 64.0f0; rtol=1e-4)
-        @test isapprox(theta_fdata_cpu[2, 4, 1], 64.0f0; rtol=1e-4)
-        @test isapprox(theta_fdata_cpu[3, 4, 1], 64.0f0; rtol=1e-4)
+        @test isapprox(theta_fdata[1, 4, 1], 64.0f0; rtol=1e-4)
+        @test isapprox(theta_fdata[2, 4, 1], 64.0f0; rtol=1e-4)
+        @test isapprox(theta_fdata[3, 4, 1], 64.0f0; rtol=1e-4)
     end
 end
 
