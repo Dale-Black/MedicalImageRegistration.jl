@@ -7307,3 +7307,47 @@ Completely rewrote the cardiac_ct.jl Pluto notebook to show preprocessing as exp
 - NOTEBOOK-VALIDATE-001: Final validation of complete notebook
 
 ---
+
+### [NOTEBOOK-REGISTER-VIS-001] Add registration step with visualization to cardiac_ct.jl
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+**What was done:**
+
+Added registration and post-processing steps to the cardiac_ct.jl notebook, building on the preprocessing visualization from NOTEBOOK-PREPROCESS-VIS-001.
+
+New sections added:
+
+1. **Step 5: Registration with Mutual Information**
+   - Handles size mismatch between preprocessed images (resamples CCTA to match NC if needed)
+   - Creates `AffineRegistration` with scales=(4,2,1), iterations=(50,25,10)
+   - Runs `register()` with `mi_loss` on preprocessed images
+   - Prints learned affine matrix
+   - Visualizes before/after with checkerboard and difference image
+
+2. **Step 6: Apply Transform to Original Resolution**
+   - Applies learned affine matrix to original CCTA using `affine_transform()`
+   - Uses `shape=nc_target_size` to output in non-contrast coordinate space
+   - Uses `interpolation=:nearest` for HU preservation
+
+3. **Step 7: HU Preservation Validation**
+   - Checks that `moved_values ⊆ original_values`
+   - Prints unique value counts and HU ranges
+
+4. **Step 8: Final Comparison**
+   - 3-panel figure: NC | Registered CCTA | Checkerboard
+   - Interactive slice browser at full resolution
+
+5. **Summary table** with all 8 steps and when-to-use guide
+
+**Key design decisions:**
+- Used `AffineRegistration` directly (not `register_clinical()`) for transparent control
+- Applied transform via `MIR.affine_transform()` rather than through displacement fields
+- Affine works in normalized [-1,1] space so applies to any resolution
+- `shape` parameter in `affine_transform` handles size mismatch between original CCTA and NC
+
+**What's left:**
+- NOTEBOOK-VALIDATE-001: Final validation that all cells reference correct variables
+
+---

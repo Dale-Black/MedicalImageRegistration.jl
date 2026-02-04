@@ -719,9 +719,299 @@ end
 
 # ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889916
 md"""
+# Registration
+
+Now we run affine registration on the preprocessed images using Mutual Information (MI) loss. MI is essential for our use case because contrast agent changes blood from ~40 HU (non-contrast) to ~300+ HU (contrast). MSE would penalize correct alignment, but MI learns that these correspond to the same structures.
+"""
+
+# ╔═╡ bb22cc33-dd44-ee55-ff66-778899001100
+md"""
+## Step 5: Registration with Mutual Information
+"""
+
+# ╔═╡ bb22cc33-dd44-ee55-ff66-778899001101
+begin
+	# Ensure both preprocessed images have the same size for registration
+	# After resampling, sizes may differ by 1-2 voxels due to rounding
+	nc_prep_size = MIR.spatial_size(nc_windowed)
+	ccta_prep_size = MIR.spatial_size(ccta_windowed)
+	println("Sizes before alignment:")
+	println("  NC:   $nc_prep_size")
+	println("  CCTA: $ccta_prep_size")
+
+	# Use the NC (static) size as target
+	# If CCTA is different size, use register_clinical's internal size matching
+	# For now, just use the raw arrays
+	moving_data = ccta_windowed.data
+	static_data = nc_windowed.data
+
+	# If sizes differ, create matching-size arrays via resample
+	if nc_prep_size != ccta_prep_size
+		# Resample CCTA to match NC size
+		println("  Resampling CCTA to match NC size...")
+		theta_id = zeros(Float32, 3, 4, 1)
+		theta_id[1,1,1] = 1f0; theta_id[2,2,1] = 1f0; theta_id[3,3,1] = 1f0
+		grid_match = MIR.affine_grid(theta_id, nc_prep_size; align_corners=true)
+		moving_data = MIR.grid_sample(ccta_windowed.data, grid_match; padding_mode=:border, align_corners=true)
+		println("  CCTA resampled to: $(size(moving_data)[1:3])")
+	end
+
+	println("\nRegistration input sizes:")
+	println("  Moving (CCTA): $(size(moving_data)[1:3])")
+	println("  Static (NC):   $(size(static_data)[1:3])")
+end
+
+# ╔═╡ bb22cc33-dd44-ee55-ff66-778899001102
+begin
+	# Create AffineRegistration and run
+	affine_reg = MIR.AffineRegistration{Float32}(
+		is_3d=true,
+		batch_size=1,
+		scales=(4, 2, 1),
+		iterations=(50, 25, 10),
+		learning_rate=0.01f0,
+		with_translation=true,
+		with_rotation=true,
+		with_zoom=true,
+		with_shear=false,
+		array_type=Array
+	)
+
+	println("Running affine registration with MI loss...")
+	println("  Scales: $(affine_reg.scales)")
+	println("  Iterations: $(affine_reg.iterations)")
+	println("  Learning rate: $(affine_reg.learning_rate)")
+	println()
+
+	# Register
+	moved_prep = MIR.register(
+		affine_reg, moving_data, static_data;
+		loss_fn=MIR.mi_loss,
+		verbose=true,
+		final_interpolation=:bilinear
+	)
+
+	println("\nRegistration complete!")
+	println("  Loss history length: $(length(affine_reg.loss_history))")
+	if !isempty(affine_reg.loss_history)
+		println("  Initial loss: $(round(affine_reg.loss_history[1], digits=4))")
+		println("  Final loss:   $(round(affine_reg.loss_history[end], digits=4))")
+	end
+end
+
+# ╔═╡ bb22cc33-dd44-ee55-ff66-778899001103
+begin
+	# Get the learned affine matrix
+	learned_theta = MIR.get_affine(affine_reg)
+	println("Learned affine matrix (3x4):")
+	theta_cpu = Array(learned_theta)
+	for i in 1:3
+		row = [round(theta_cpu[i, j, 1], digits=4) for j in 1:4]
+		println("  ", row)
+	end
+end
+
+# ╔═╡ bb22cc33-dd44-ee55-ff66-778899001104
+let
+	# Visualize: preprocessed moving BEFORE vs AFTER registration
+	mid_z = MIR.spatial_size(nc_windowed)[3] ÷ 2
+
+	nc_slice = normalize_for_vis(static_data[:, :, mid_z, 1, 1])
+	ccta_before = normalize_for_vis(moving_data[:, :, mid_z, 1, 1])
+	ccta_after = normalize_for_vis(moved_prep[:, :, mid_z, 1, 1])
+
+	# Checkerboards
+	checker_before = checkerboard_overlay(nc_slice, ccta_before; block_size=16)
+	checker_after = checkerboard_overlay(nc_slice, ccta_after; block_size=16)
+
+	fig = CM.Figure(size=(1200, 800))
+
+	# Top row: images
+	ax1 = CM.Axis(fig[1, 1], title="NC (Static)", aspect=CM.DataAspect())
+	CM.heatmap!(ax1, nc_slice', colormap=:grays)
+	CM.hidedecorations!(ax1)
+
+	ax2 = CM.Axis(fig[1, 2], title="CCTA Before Registration", aspect=CM.DataAspect())
+	CM.heatmap!(ax2, ccta_before', colormap=:grays)
+	CM.hidedecorations!(ax2)
+
+	ax3 = CM.Axis(fig[1, 3], title="CCTA After Registration", aspect=CM.DataAspect())
+	CM.heatmap!(ax3, ccta_after', colormap=:grays)
+	CM.hidedecorations!(ax3)
+
+	# Bottom row: checkerboards and difference
+	ax4 = CM.Axis(fig[2, 1], title="Checkerboard (Before)", aspect=CM.DataAspect())
+	CM.heatmap!(ax4, checker_before', colormap=:grays)
+	CM.hidedecorations!(ax4)
+
+	ax5 = CM.Axis(fig[2, 2], title="Checkerboard (After)", aspect=CM.DataAspect())
+	CM.heatmap!(ax5, checker_after', colormap=:grays)
+	CM.hidedecorations!(ax5)
+
+	ax6 = CM.Axis(fig[2, 3], title="|NC - Registered CCTA|", aspect=CM.DataAspect())
+	diff_img = abs.(nc_slice .- ccta_after)
+	CM.heatmap!(ax6, diff_img', colormap=:hot, colorrange=(0, 0.5))
+	CM.hidedecorations!(ax6)
+
+	CM.Label(fig[0, :], "Registration Results (Preprocessed, Slice $mid_z)", fontsize=20)
+	fig
+end
+
+# ╔═╡ bb22cc33-dd44-ee55-ff66-778899001105
+md"""
+## Step 6: Apply Transform to Original Resolution
+
+The registration was performed at 2mm isotropic on preprocessed images. Now we need to apply the learned affine transform to the **original high-resolution CCTA** (0.5mm) using nearest-neighbor interpolation to preserve exact HU values.
+"""
+
+# ╔═╡ bb22cc33-dd44-ee55-ff66-778899001106
+begin
+	# Apply learned affine to the ORIGINAL CCTA volume at full resolution
+	# We use the affine matrix learned on preprocessed images
+	# and apply it to the original data with nearest-neighbor
+
+	# The affine was learned in normalized [-1,1] space, so it applies
+	# to any resolution - just need to match the output size
+
+	# Target: register CCTA into non-contrast coordinate space
+	nc_target_size = MIR.spatial_size(nc_physical)
+	println("Applying transform to original resolution:")
+	println("  CCTA original size: $(MIR.spatial_size(ccta_physical))")
+	println("  NC target size:     $nc_target_size")
+	println("  Using nearest-neighbor for HU preservation")
+
+	moved_original = MIR.affine_transform(
+		ccta_physical.data,
+		learned_theta;
+		shape=nc_target_size,
+		padding_mode=:border,
+		align_corners=true,
+		interpolation=:nearest
+	)
+
+	println("  Output size: $(size(moved_original)[1:3])")
+end
+
+# ╔═╡ bb22cc33-dd44-ee55-ff66-778899001107
+md"""
+## Step 7: HU Preservation Validation
+
+Since we used `interpolation=:nearest`, the output image should contain ONLY values that existed in the original CCTA scan. This is critical for quantitative analysis like calcium scoring (130 HU threshold).
+"""
+
+# ╔═╡ bb22cc33-dd44-ee55-ff66-778899001108
+begin
+	# Validate HU preservation
+	original_values = Set(vec(ccta_physical.data))
+	moved_values = Set(vec(moved_original))
+
+	n_original = length(original_values)
+	n_moved = length(moved_values)
+
+	hu_preserved = moved_values ⊆ original_values
+
+	println("=" ^ 60)
+	println("HU PRESERVATION VALIDATION")
+	println("=" ^ 60)
+	println("Original CCTA unique values: $n_original")
+	println("Registered output unique values: $n_moved")
+	println()
+
+	if hu_preserved
+		println("HU PRESERVATION VERIFIED")
+		println("  All output values exist in original input")
+		println("  Safe for quantitative analysis!")
+	else
+		new_values = setdiff(moved_values, original_values)
+		println("WARNING: $(length(new_values)) new values created")
+		println("  Check interpolation settings")
+	end
+
+	println()
+	println("Original HU range: $(extrema(ccta_physical.data))")
+	println("Output HU range:   $(extrema(moved_original))")
+	println("=" ^ 60)
+end
+
+# ╔═╡ bb22cc33-dd44-ee55-ff66-778899001109
+md"""
+## Step 8: Final Comparison
+
+Compare the non-contrast, original CCTA, and registered CCTA side by side.
+"""
+
+# ╔═╡ bb22cc33-dd44-ee55-ff66-77889900110a
+let
+	# 3-panel comparison at NC resolution
+	mid_z = nc_data.size_voxels[3] ÷ 2
+
+	nc_slice = nc_data.volume[:, :, mid_z, 1, 1]
+	moved_slice = moved_original[:, :, mid_z, 1, 1]
+
+	nc_norm = normalize_for_vis(nc_slice)
+	moved_norm = normalize_for_vis(moved_slice)
+
+	# Checkerboard: NC vs registered CCTA (at original resolution)
+	checker = checkerboard_overlay(nc_norm, moved_norm; block_size=32)
+
+	fig = CM.Figure(size=(1200, 400))
+
+	ax1 = CM.Axis(fig[1, 1], title="Non-Contrast (Static)", aspect=CM.DataAspect())
+	CM.heatmap!(ax1, nc_norm', colormap=:grays)
+	CM.hidedecorations!(ax1)
+
+	ax2 = CM.Axis(fig[1, 2], title="Registered CCTA (Nearest-Neighbor)", aspect=CM.DataAspect())
+	CM.heatmap!(ax2, moved_norm', colormap=:grays)
+	CM.hidedecorations!(ax2)
+
+	ax3 = CM.Axis(fig[1, 3], title="Checkerboard Overlay", aspect=CM.DataAspect())
+	CM.heatmap!(ax3, checker', colormap=:grays)
+	CM.hidedecorations!(ax3)
+
+	CM.Label(fig[0, :], "Final Result (Original Resolution, Slice $mid_z)", fontsize=20)
+	fig
+end
+
+# ╔═╡ bb22cc33-dd44-ee55-ff66-77889900110b
+md"""
+## Slice-by-Slice Comparison (Final Result)
+
+Browse through slices of the final registered result.
+"""
+
+# ╔═╡ bb22cc33-dd44-ee55-ff66-77889900110c
+@bind final_slice_idx UI.Slider(1:nc_data.size_voxels[3], default=nc_data.size_voxels[3] ÷ 2, show_value=true)
+
+# ╔═╡ bb22cc33-dd44-ee55-ff66-77889900110d
+let
+	nc_slice = normalize_for_vis(nc_data.volume[:, :, final_slice_idx, 1, 1])
+	moved_slice = normalize_for_vis(moved_original[:, :, final_slice_idx, 1, 1])
+
+	checker = checkerboard_overlay(nc_slice, moved_slice; block_size=32)
+
+	fig = CM.Figure(size=(1000, 350))
+
+	ax1 = CM.Axis(fig[1, 1], title="Non-Contrast", aspect=CM.DataAspect())
+	CM.heatmap!(ax1, nc_slice', colormap=:grays)
+	CM.hidedecorations!(ax1)
+
+	ax2 = CM.Axis(fig[1, 2], title="Registered CCTA", aspect=CM.DataAspect())
+	CM.heatmap!(ax2, moved_slice', colormap=:grays)
+	CM.hidedecorations!(ax2)
+
+	ax3 = CM.Axis(fig[1, 3], title="Checkerboard", aspect=CM.DataAspect())
+	CM.heatmap!(ax3, checker', colormap=:grays)
+	CM.hidedecorations!(ax3)
+
+	CM.Label(fig[0, :], "Slice $final_slice_idx of $(nc_data.size_voxels[3])", fontsize=16)
+	fig
+end
+
+# ╔═╡ bb22cc33-dd44-ee55-ff66-77889900110e
+md"""
 ## Summary
 
-This notebook demonstrated the preprocessing pipeline for clinical cardiac CT registration:
+This notebook demonstrated the complete clinical cardiac CT registration workflow:
 
 | Step | What it Does | Why it Matters |
 |------|-------------|----------------|
@@ -729,13 +1019,19 @@ This notebook demonstrated the preprocessing pipeline for clinical cardiac CT re
 | **2. FOV Overlap** | Finds region where both scans have data | CCTA FOV is smaller than non-contrast |
 | **3. Resampling** | Brings both to 2mm isotropic grid | Needed for optimization (same voxel grid) |
 | **4. Windowing** | Clips to [-200, 1000] HU | Focuses on tissue, removes extreme artifacts |
+| **5. Registration** | Affine registration with MI loss | Handles contrast intensity mismatch |
+| **6. Apply Transform** | Apply affine to original CCTA at full res | Get high-resolution registered output |
+| **7. HU Validation** | Verify nearest-neighbor preserves HU | Critical for quantitative analysis |
+| **8. Comparison** | Side-by-side and checkerboard views | Visual quality assessment |
 
-After preprocessing, the images are ready for registration (see next notebook section).
+### When to Use Different Settings
 
-**Next steps** (NOTEBOOK-REGISTER-VIS-001):
-- Run affine registration with MI loss on the preprocessed images
-- Apply learned transform to original high-res CCTA with nearest-neighbor for HU preservation
-- Validate results
+| Use Case | Loss Function | Preserve HU |
+|----------|--------------|-------------|
+| Same-modality (CT to CT, no contrast) | `mse_loss` | Depends on analysis |
+| Multi-modal (contrast vs non-contrast) | `mi_loss` | Yes for quantitative |
+| Visual alignment only | `mse_loss` or `mi_loss` | No (bilinear is smoother) |
+| Calcium scoring, dose calculation | `mi_loss` | **Always yes** |
 """
 
 # ╔═╡ Cell order:
@@ -792,3 +1088,18 @@ After preprocessing, the images are ready for registration (see next notebook se
 # ╠═aa11bb22-cc33-dd44-ee55-ff6677889914
 # ╟─aa11bb22-cc33-dd44-ee55-ff6677889915
 # ╟─aa11bb22-cc33-dd44-ee55-ff6677889916
+# ╟─bb22cc33-dd44-ee55-ff66-778899001100
+# ╠═bb22cc33-dd44-ee55-ff66-778899001101
+# ╠═bb22cc33-dd44-ee55-ff66-778899001102
+# ╠═bb22cc33-dd44-ee55-ff66-778899001103
+# ╟─bb22cc33-dd44-ee55-ff66-778899001104
+# ╟─bb22cc33-dd44-ee55-ff66-778899001105
+# ╠═bb22cc33-dd44-ee55-ff66-778899001106
+# ╟─bb22cc33-dd44-ee55-ff66-778899001107
+# ╠═bb22cc33-dd44-ee55-ff66-778899001108
+# ╟─bb22cc33-dd44-ee55-ff66-778899001109
+# ╟─bb22cc33-dd44-ee55-ff66-77889900110a
+# ╟─bb22cc33-dd44-ee55-ff66-77889900110b
+# ╠═bb22cc33-dd44-ee55-ff66-77889900110c
+# ╟─bb22cc33-dd44-ee55-ff66-77889900110d
+# ╟─bb22cc33-dd44-ee55-ff66-77889900110e

@@ -795,7 +795,7 @@
       "id": "NOTEBOOK-REGISTER-VIS-001",
       "type": "IMPL",
       "title": "Add registration step with visualization to cardiac_ct.jl",
-      "status": "pending",
+      "status": "done",
       "priority": 34,
       "blockedBy": ["NOTEBOOK-PREPROCESS-VIS-001"],
       "description": "After the preprocessing cells are added, add the REGISTRATION step as a separate visible section. Use the PREPROCESSED images (from the previous cells) as input to registration. Show registration progress and results clearly. The user must be able to see what the registration optimizer did ON TOP of the preprocessing.",
