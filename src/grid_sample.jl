@@ -26,11 +26,16 @@ abstract type AbstractPaddingMode end
 struct ZerosPadding <: AbstractPaddingMode end
 struct BorderPadding <: AbstractPaddingMode end
 
-"""
-    grid_sample(input, grid; padding_mode=:zeros, align_corners=true)
+# Interpolation mode types for GPU-compatible dispatch
+abstract type AbstractInterpolationMode end
+struct BilinearInterpolation <: AbstractInterpolationMode end  # Also trilinear for 3D
+struct NearestInterpolation <: AbstractInterpolationMode end
 
-Sample from `input` at locations specified by `grid` using bilinear (2D) or
-trilinear (3D) interpolation.
+"""
+    grid_sample(input, grid; padding_mode=:zeros, align_corners=true, interpolation=:bilinear)
+
+Sample from `input` at locations specified by `grid` using bilinear/trilinear
+or nearest-neighbor interpolation.
 
 # Arguments
 - `input`: Input array of shape (X, Y, C, N) for 2D or (X, Y, Z, C, N) for 3D
@@ -43,6 +48,10 @@ trilinear (3D) interpolation.
   - `:border`: Clamp to border values
 - `align_corners`: If true (default), corner pixels are at -1 and 1.
   If false, the corners of the image are at -1 and 1 (not pixel centers).
+- `interpolation`: Interpolation mode
+  - `:bilinear` (default): Bilinear (2D) or trilinear (3D) interpolation. Smooth gradients.
+  - `:nearest`: Nearest-neighbor interpolation. Returns exact input values (HU-preserving).
+    Gradient is zero (non-differentiable).
 
 # Returns
 - Sampled output of shape (X_out, Y_out, C, N) for 2D or (X_out, Y_out, Z_out, C, N) for 3D
@@ -51,20 +60,24 @@ function grid_sample(
     input::AbstractArray{T,4},
     grid::AbstractArray{T,4};
     padding_mode::Symbol=:zeros,
-    align_corners::Bool=true
+    align_corners::Bool=true,
+    interpolation::Symbol=:bilinear
 ) where T
     pm = padding_mode === :zeros ? ZerosPadding() : BorderPadding()
-    return _grid_sample_2d(input, grid, pm, Val(align_corners))
+    im = interpolation === :nearest ? NearestInterpolation() : BilinearInterpolation()
+    return _grid_sample_2d(input, grid, pm, Val(align_corners), im)
 end
 
 function grid_sample(
     input::AbstractArray{T,5},
     grid::AbstractArray{T,5};
     padding_mode::Symbol=:zeros,
-    align_corners::Bool=true
+    align_corners::Bool=true,
+    interpolation::Symbol=:bilinear
 ) where T
     pm = padding_mode === :zeros ? ZerosPadding() : BorderPadding()
-    return _grid_sample_3d(input, grid, pm, Val(align_corners))
+    im = interpolation === :nearest ? NearestInterpolation() : BilinearInterpolation()
+    return _grid_sample_3d(input, grid, pm, Val(align_corners), im)
 end
 
 # ============================================================================
@@ -75,7 +88,8 @@ function _grid_sample_2d(
     input::AbstractArray{T,4},
     grid::AbstractArray{T,4},
     ::PM,
-    ::Val{AC}
+    ::Val{AC},
+    ::BilinearInterpolation
 ) where {T, PM<:AbstractPaddingMode, AC}
     X_in, Y_in, C, N = size(input)
     coord_dim, X_out, Y_out, N_grid = size(grid)
@@ -103,6 +117,40 @@ function _grid_sample_2d(
     return output
 end
 
+# 2D Nearest-Neighbor Grid Sample
+function _grid_sample_2d(
+    input::AbstractArray{T,4},
+    grid::AbstractArray{T,4},
+    ::PM,
+    ::Val{AC},
+    ::NearestInterpolation
+) where {T, PM<:AbstractPaddingMode, AC}
+    X_in, Y_in, C, N = size(input)
+    coord_dim, X_out, Y_out, N_grid = size(grid)
+
+    @assert coord_dim == 2 "Grid must have 2 coordinates for 2D input"
+    @assert N == N_grid "Batch size mismatch between input ($N) and grid ($N_grid)"
+
+    output = similar(input, X_out, Y_out, C, N)
+
+    AK.foreachindex(output) do idx
+        # Convert linear index to (i_out, j_out, c, n)
+        i_out, j_out, c, n = _linear_to_cartesian_4d(idx, X_out, Y_out, C)
+
+        # Get normalized coordinates from grid
+        x_norm = @inbounds grid[1, i_out, j_out, n]
+        y_norm = @inbounds grid[2, i_out, j_out, n]
+
+        # Unnormalize to pixel coordinates
+        x_pix, y_pix = _unnormalize_2d(x_norm, y_norm, X_in, Y_in, AC)
+
+        # Nearest-neighbor interpolation - round to nearest integer
+        @inbounds output[idx] = _nearest_sample_2d(input, x_pix, y_pix, c, n, X_in, Y_in, PM())
+    end
+
+    return output
+end
+
 # ============================================================================
 # 3D Trilinear Grid Sample
 # ============================================================================
@@ -111,7 +159,8 @@ function _grid_sample_3d(
     input::AbstractArray{T,5},
     grid::AbstractArray{T,5},
     ::PM,
-    ::Val{AC}
+    ::Val{AC},
+    ::BilinearInterpolation
 ) where {T, PM<:AbstractPaddingMode, AC}
     X_in, Y_in, Z_in, C, N = size(input)
     coord_dim, X_out, Y_out, Z_out, N_grid = size(grid)
@@ -135,6 +184,41 @@ function _grid_sample_3d(
 
         # Trilinear interpolation
         @inbounds output[idx] = _trilinear_sample(input, x_pix, y_pix, z_pix, c, n, X_in, Y_in, Z_in, PM())
+    end
+
+    return output
+end
+
+# 3D Nearest-Neighbor Grid Sample
+function _grid_sample_3d(
+    input::AbstractArray{T,5},
+    grid::AbstractArray{T,5},
+    ::PM,
+    ::Val{AC},
+    ::NearestInterpolation
+) where {T, PM<:AbstractPaddingMode, AC}
+    X_in, Y_in, Z_in, C, N = size(input)
+    coord_dim, X_out, Y_out, Z_out, N_grid = size(grid)
+
+    @assert coord_dim == 3 "Grid must have 3 coordinates for 3D input"
+    @assert N == N_grid "Batch size mismatch between input ($N) and grid ($N_grid)"
+
+    output = similar(input, X_out, Y_out, Z_out, C, N)
+
+    AK.foreachindex(output) do idx
+        # Convert linear index to (i_out, j_out, k_out, c, n)
+        i_out, j_out, k_out, c, n = _linear_to_cartesian_5d(idx, X_out, Y_out, Z_out, C)
+
+        # Get normalized coordinates from grid
+        x_norm = @inbounds grid[1, i_out, j_out, k_out, n]
+        y_norm = @inbounds grid[2, i_out, j_out, k_out, n]
+        z_norm = @inbounds grid[3, i_out, j_out, k_out, n]
+
+        # Unnormalize to pixel coordinates
+        x_pix, y_pix, z_pix = _unnormalize_3d(x_norm, y_norm, z_norm, X_in, Y_in, Z_in, AC)
+
+        # Nearest-neighbor interpolation
+        @inbounds output[idx] = _nearest_sample_3d(input, x_pix, y_pix, z_pix, c, n, X_in, Y_in, Z_in, PM())
     end
 
     return output
@@ -258,6 +342,25 @@ end
 end
 
 # ============================================================================
+# Nearest-Neighbor Interpolation (2D)
+# ============================================================================
+
+@inline function _nearest_sample_2d(
+    input::AbstractArray{T,4},
+    x::T, y::T,
+    c::Int, n::Int,
+    X::Int, Y::Int,
+    pm::PM
+) where {T, PM<:AbstractPaddingMode}
+    # Round to nearest integer index
+    i_nearest = unsafe_trunc(Int, round(x))
+    j_nearest = unsafe_trunc(Int, round(y))
+
+    # Sample at the nearest pixel
+    return _sample_pixel_2d(input, i_nearest, j_nearest, c, n, X, Y, pm)
+end
+
+# ============================================================================
 # Trilinear Interpolation (3D)
 # ============================================================================
 
@@ -320,6 +423,26 @@ end
     j_clamped = clamp(j, 1, Y)
     k_clamped = clamp(k, 1, Z)
     return @inbounds input[i_clamped, j_clamped, k_clamped, c, n]
+end
+
+# ============================================================================
+# Nearest-Neighbor Interpolation (3D)
+# ============================================================================
+
+@inline function _nearest_sample_3d(
+    input::AbstractArray{T,5},
+    x::T, y::T, z::T,
+    c::Int, n::Int,
+    X::Int, Y::Int, Z::Int,
+    pm::PM
+) where {T, PM<:AbstractPaddingMode}
+    # Round to nearest integer index
+    i_nearest = unsafe_trunc(Int, round(x))
+    j_nearest = unsafe_trunc(Int, round(y))
+    k_nearest = unsafe_trunc(Int, round(z))
+
+    # Sample at the nearest voxel
+    return _sample_pixel_3d(input, i_nearest, j_nearest, k_nearest, c, n, X, Y, Z, pm)
 end
 
 # ============================================================================
@@ -636,7 +759,8 @@ function Mooncake.rrule!!(
     input::CoDual{A1, F1},
     grid::CoDual{A2, F2};
     padding_mode::Symbol=:zeros,
-    align_corners::Bool=true
+    align_corners::Bool=true,
+    interpolation::Symbol=:bilinear
 ) where {A1<:AbstractArray{<:Any,4}, F1, A2<:AbstractArray{<:Any,4}, F2}
     input_primal = input.x
     input_fdata = input.dx
@@ -645,14 +769,19 @@ function Mooncake.rrule!!(
 
     pm = padding_mode === :zeros ? ZerosPadding() : BorderPadding()
     ac = Val(align_corners)
+    use_nearest = interpolation === :nearest
 
-    output = grid_sample(input_primal, grid_primal; padding_mode, align_corners)
+    output = grid_sample(input_primal, grid_primal; padding_mode, align_corners, interpolation)
     output_fdata = similar(output)
     fill!(output_fdata, zero(eltype(output)))
 
     function grid_sample_2d_pullback(_rdata)
-        _∇grid_sample_input_2d!(input_fdata, output_fdata, grid_primal, pm, ac)
-        _∇grid_sample_grid_2d!(grid_fdata, output_fdata, input_primal, grid_primal, pm, ac)
+        # Nearest-neighbor interpolation has zero gradients (non-differentiable)
+        if !use_nearest
+            _∇grid_sample_input_2d!(input_fdata, output_fdata, grid_primal, pm, ac)
+            _∇grid_sample_grid_2d!(grid_fdata, output_fdata, input_primal, grid_primal, pm, ac)
+        end
+        # For nearest mode, input_fdata and grid_fdata stay at zero
         return NoRData(), NoRData(), NoRData()
     end
 
@@ -665,7 +794,8 @@ function Mooncake.rrule!!(
     input::CoDual{A1, F1},
     grid::CoDual{A2, F2};
     padding_mode::Symbol=:zeros,
-    align_corners::Bool=true
+    align_corners::Bool=true,
+    interpolation::Symbol=:bilinear
 ) where {A1<:AbstractArray{<:Any,5}, F1, A2<:AbstractArray{<:Any,5}, F2}
     input_primal = input.x
     input_fdata = input.dx
@@ -674,14 +804,19 @@ function Mooncake.rrule!!(
 
     pm = padding_mode === :zeros ? ZerosPadding() : BorderPadding()
     ac = Val(align_corners)
+    use_nearest = interpolation === :nearest
 
-    output = grid_sample(input_primal, grid_primal; padding_mode, align_corners)
+    output = grid_sample(input_primal, grid_primal; padding_mode, align_corners, interpolation)
     output_fdata = similar(output)
     fill!(output_fdata, zero(eltype(output)))
 
     function grid_sample_3d_pullback(_rdata)
-        _∇grid_sample_input_3d!(input_fdata, output_fdata, grid_primal, pm, ac)
-        _∇grid_sample_grid_3d!(grid_fdata, output_fdata, input_primal, grid_primal, pm, ac)
+        # Nearest-neighbor interpolation has zero gradients (non-differentiable)
+        if !use_nearest
+            _∇grid_sample_input_3d!(input_fdata, output_fdata, grid_primal, pm, ac)
+            _∇grid_sample_grid_3d!(grid_fdata, output_fdata, input_primal, grid_primal, pm, ac)
+        end
+        # For nearest mode, input_fdata and grid_fdata stay at zero
         return NoRData(), NoRData(), NoRData()
     end
 
