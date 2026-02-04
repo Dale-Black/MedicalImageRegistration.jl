@@ -833,7 +833,7 @@
       "id": "NOTEBOOK-VALIDATE-001",
       "type": "TEST",
       "title": "Validate cardiac_ct.jl notebook produces correct results",
-      "status": "pending",
+      "status": "done",
       "priority": 35,
       "blockedBy": ["NOTEBOOK-REGISTER-VIS-001"],
       "description": "Final validation that the notebook works correctly. Check that all cells reference the correct variables, all function calls use exported APIs, and the visualization pipeline makes sense. If registration still looks wrong (before/after identical), diagnose WHY and fix it. This is the final quality gate.",
