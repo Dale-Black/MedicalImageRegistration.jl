@@ -49,6 +49,9 @@ if PYTHON_AVAILABLE
 
     # Transform resampling tests
     include("test_resample_transform.jl")
+
+    # Clinical registration workflow tests
+    include("test_clinical.jl")
 else
     @warn "Skipping all Python-based parity tests"
 

@@ -28,6 +28,9 @@ include("types.jl")
 include("affine.jl")
 include("syn.jl")
 
+# High-level clinical registration workflow
+include("clinical.jl")
+
 # Exports - Core operations
 export grid_sample
 export affine_grid
@@ -53,5 +56,9 @@ export gauss_smoothing, linear_elasticity
 export AffineRegistration, SyNRegistration
 export register, transform, fit!, reset!, get_affine
 export affine_transform, apply_flows
+
+# Exports - Clinical workflow
+export ClinicalRegistrationResult
+export register_clinical, transform_clinical, transform_clinical_inverse
 
 end # module
