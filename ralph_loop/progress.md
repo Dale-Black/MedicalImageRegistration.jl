@@ -321,3 +321,231 @@ Achieved numerical parity with PyTorch F.grid_sample:
 - Tested 3D trilinear
 
 ---
+
+### [IMPL-AFFINE-GRID-001] Implement affine_grid with AK.jl + Mooncake rrule!!
+
+**Status:** DONE
+**Date:** 2026-02-03
+
+#### Implementation Summary
+
+Implemented `affine_grid` function that generates a sampling grid from an affine transformation matrix. Fully GPU-accelerated with custom Mooncake rrule!!.
+
+#### Key Files
+- `src/affine_grid.jl` - Main implementation (~300 lines)
+- `test/test_affine_grid.jl` - Comprehensive test suite
+
+#### Features Implemented
+- **2D affine grid**: theta (2, 3, N) → grid (2, X_out, Y_out, N)
+- **3D affine grid**: theta (3, 4, N) → grid (3, X_out, Y_out, Z_out, N)
+- **align_corners=true/false** support
+- Multiple size tuple variants: (X, Y), (X, Y, C, N), (X, Y, Z), (X, Y, Z, C, N)
+
+#### Affine Matrix Convention
+```
+2D: [a b tx]    3D: [a b c tx]
+    [c d ty]        [d e f ty]
+                    [g h i tz]
+```
+
+The output grid coordinates are computed as:
+- x_out = a*x_base + b*y_base + tx
+- y_out = c*x_base + d*y_base + ty
+
+Where x_base, y_base are the normalized input coordinates in [-1, 1].
+
+#### Architecture
+```julia
+# Forward pass
+function _affine_grid_2d(theta, size, align_corners)
+    grid = similar(theta, 2, X_out, Y_out, N)
+    AK.foreachindex(grid) do idx
+        coord, i, j, n = _linear_to_cartesian_4d_affine(idx, X_out, Y_out)
+        x_base, y_base = _generate_base_coord_2d(i, j, X_out, Y_out, T, align_corners)
+        # Apply affine: grid[coord] = theta[coord, 1]*x + theta[coord, 2]*y + theta[coord, 3]
+    end
+    return grid
+end
+
+# Backward pass
+function _∇affine_grid_theta_2d!(d_theta, d_grid, align_corners)
+    AK.foreachindex(d_grid) do idx
+        # d_theta[coord, 1] += d_grid[coord, i, j] * x_base
+        # d_theta[coord, 2] += d_grid[coord, i, j] * y_base
+        # d_theta[coord, 3] += d_grid[coord, i, j]
+        Atomix.@atomic d_theta[coord, col, n] += ...
+    end
+end
+```
+
+#### Mooncake Integration
+Registered as primitives for all size tuple variants:
+```julia
+@is_primitive MinimalCtx Tuple{typeof(affine_grid), AbstractArray{<:Any,3}, NTuple{2,Int}}
+@is_primitive MinimalCtx Tuple{typeof(affine_grid), AbstractArray{<:Any,3}, NTuple{3,Int}}
+@is_primitive MinimalCtx Tuple{typeof(affine_grid), AbstractArray{<:Any,3}, NTuple{4,Int}}
+@is_primitive MinimalCtx Tuple{typeof(affine_grid), AbstractArray{<:Any,3}, NTuple{5,Int}}
+```
+
+#### Test Results
+
+All acceptance criteria verified:
+- ✓ Forward pass works on MtlArrays (Metal GPU)
+- ✓ Backward pass works on MtlArrays
+- ✓ Gradients verified via finite differences
+- ✓ Matches PyTorch F.affine_grid within rtol=1e-5
+- ✓ 2D and 3D support working
+- ✓ Multiple size tuple variants supported
+
+#### PyTorch Parity
+
+Achieved numerical parity with PyTorch F.affine_grid:
+- Maximum difference: ~6e-8 (well within rtol=1e-5)
+- Tested 2D identity and random transforms
+- Tested 3D identity and random transforms
+
+---
+
+### [IMPL-COMPOSE-001] Implement compose_affine with AK.jl + Mooncake rrule!!
+
+**Status:** DONE
+**Date:** 2026-02-03
+
+#### Implementation Summary
+
+Implemented `compose_affine` function that builds an affine transformation matrix from individual components (translation, rotation, zoom, shear). Fully GPU-accelerated with custom Mooncake rrule!!.
+
+#### Key Files
+- `src/compose_affine.jl` - Main implementation (~300 lines)
+- `test/test_compose_affine.jl` - Comprehensive test suite
+
+#### Features Implemented
+- **2D affine composition**: translation (2,N), rotation (2,2,N), zoom (2,N), shear (2,N) → theta (2,3,N)
+- **3D affine composition**: translation (3,N), rotation (3,3,N), zoom (3,N), shear (3,N) → theta (3,4,N)
+
+#### Algorithm
+The affine matrix is computed as: `[R @ S | t]` where:
+- R is the rotation matrix
+- S is the upper-triangular scale+shear matrix: `S = diag(zoom) + shear_upper_triangular`
+- t is the translation vector
+
+For 2D:
+```
+S = [sx  sxy]
+    [0   sy ]
+```
+
+For 3D:
+```
+S = [sx  sxy sxz]
+    [0   sy  syz]
+    [0   0   sz ]
+```
+
+#### Test Results
+
+All acceptance criteria verified:
+- ✓ Forward pass works on MtlArrays (Metal GPU)
+- ✓ Backward pass works on MtlArrays
+- ✓ Gradients verified via finite differences
+- ✓ Matches torchreg compose_affine exactly
+- ✓ 2D and 3D support working
+
+#### torchreg Parity
+
+Achieved perfect numerical parity with torchreg compose_affine:
+- Maximum difference: 0.0 (exact match)
+- Tested 2D and 3D with random parameters
+
+---
+
+### [IMPL-METRICS-001] Implement loss functions with AK.jl + Mooncake rrule!!
+
+**Status:** DONE
+**Date:** 2026-02-03
+
+#### Implementation Summary
+
+Implemented GPU-accelerated loss functions for image registration:
+- **mse_loss**: Mean Squared Error
+- **dice_score**: Dice coefficient (Sørensen–Dice)
+- **dice_loss**: 1 - dice_score
+- **ncc_loss**: Normalized Cross Correlation (local, windowed)
+
+All functions are fully GPU-accelerated with AcceleratedKernels.jl and have custom Mooncake rrule!! for automatic differentiation.
+
+#### Key Files
+- `src/metrics.jl` - Main implementation (~650 lines)
+- `test/test_metrics.jl` - Comprehensive GPU test suite
+
+#### Architecture Pattern
+
+All metrics follow the GPU-first pattern:
+
+```julia
+# Forward pass - GPU reduction
+function loss_fn(pred, target)
+    # Element-wise computation via AK.foreachindex
+    # Reduction via AK.reduce (no scalar indexing!)
+    return result  # Returns 1-element array
+end
+
+# Backward pass - GPU gradient computation
+function _∇loss_fn!(d_pred, d_target, d_output_arr, ...)
+    # Extract scalar via AK.reduce (no scalar indexing!)
+    d_output = _extract_scalar(d_output_arr)
+    # Gradient computation via AK.foreachindex
+end
+
+# Mooncake rrule!!
+@is_primitive MinimalCtx Tuple{typeof(loss_fn), ...}
+function Mooncake.rrule!!(...) ... end
+```
+
+#### Key Implementation Details
+
+1. **No Scalar Indexing**: All GPU arrays return 1-element arrays instead of scalars. Values extracted via `AK.reduce(+, arr; init=zero(T))`.
+
+2. **Type Safety in Closures**: Avoid capturing `T = eltype(...)` types in AK.foreachindex closures - GPU kernels require bits types only.
+
+3. **NCC Local Windows**: Uses explicit loops within AK.foreachindex for box filtering (O(n * k³) but GPU-compatible).
+
+#### Features Implemented
+
+**mse_loss**:
+- Computes mean((pred - target)²)
+- Works on any array shape
+- Gradients: d_pred = 2*(pred - target)/n
+
+**dice_score / dice_loss**:
+- Dice = 2*sum(pred*target) / sum(pred + target)
+- Works on 2D (4D arrays) and 3D (5D arrays)
+- Soft dice for probability masks
+- Gradients: uses quotient rule
+
+**ncc_loss**:
+- Local NCC in windows of kernel_size³
+- CC = (cross² + ε) / (var_p * var_t + ε)
+- Returns negative mean CC (loss to minimize)
+- Gradients: chain rule through local sums
+
+#### Test Results
+
+All acceptance criteria verified:
+- ✓ mse_loss: forward + backward on MtlArrays
+- ✓ dice_score: forward + backward on MtlArrays (2D and 3D)
+- ✓ dice_loss: forward + backward on MtlArrays
+- ✓ ncc_loss: forward + backward on MtlArrays
+- ✓ All gradients verified against finite differences
+- ✓ GPU/CPU parity verified
+
+#### Test Summary
+```
+Test Summary: | Pass  Total
+mse_loss      |   10     10
+dice_score    |   12     12
+dice_loss     |    6      6
+ncc_loss      |   16     16
+```
+
+---

@@ -14,10 +14,12 @@ using Atomix
 include("grid_sample.jl")
 include("affine_grid.jl")
 include("compose_affine.jl")
+include("metrics.jl")
 
 # Exports
 export grid_sample
 export affine_grid
 export compose_affine
+export mse_loss, dice_loss, dice_score, ncc_loss
 
 end # module

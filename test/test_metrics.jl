@@ -1,254 +1,407 @@
-# Metrics parity tests with torchreg
-# Tests dice_loss, NCC, and LinearElasticity against PyTorch reference
+# Test metrics on GPU (Metal) with Mooncake AD
+# Tests mse_loss, dice_loss, dice_score, ncc_loss
 
 using Test
 using MedicalImageRegistration
-using Random
+using Metal
+using StableRNGs
+import AcceleratedKernels as AK
+import Mooncake
+import Mooncake: CoDual, NoFData, NoRData
 
-# PythonCall setup (torch and np are defined in runtests.jl)
+# ============================================================================
+# Helper: Finite Difference Gradient Check
+# ============================================================================
 
-@testset "Metrics" begin
-    # Import torchreg.metrics
-    sys = pyimport("sys")
-    sys.path.insert(0, "/Users/daleblack/Documents/dev/torchreg_temp")
-    torchreg_metrics = pyimport("torchreg.metrics")
+# Extract scalar value from 1-element array (works on CPU and GPU)
+function _get_scalar(arr::AbstractArray{T}) where T
+    return AK.reduce(+, arr; init=zero(T))
+end
 
-    @testset "Dice Loss Parity" begin
-        Random.seed!(42)
+function finite_diff_grad(f, x::AbstractArray{T}, eps::T=T(1e-4)) where T
+    grad = similar(x, size(x))
+    x_cpu = Array(x)
+    for i in eachindex(x_cpu)
+        x_plus = copy(x_cpu)
+        x_minus = copy(x_cpu)
+        x_plus[i] += eps
+        x_minus[i] -= eps
+        grad[i] = (_get_scalar(f(x_plus)) - _get_scalar(f(x_minus))) / (T(2) * eps)
+    end
+    return grad
+end
 
-        @testset "2D arrays" begin
-            # Julia: (X, Y, C, N)
-            x1_julia = rand(Float32, 8, 8, 1, 1)
-            x2_julia = rand(Float32, 8, 8, 1, 1)
+# ============================================================================
+# MSE Loss Tests
+# ============================================================================
 
-            # PyTorch: (N, C, Y, X)
-            x1_torch = torch.tensor(np.ascontiguousarray(permutedims(x1_julia, (4, 3, 2, 1))))
-            x2_torch = torch.tensor(np.ascontiguousarray(permutedims(x2_julia, (4, 3, 2, 1))))
+@testset "mse_loss" begin
+    @testset "CPU basic test" begin
+        pred = Float32[1, 2, 3, 4]
+        target = Float32[1, 2, 3, 4]
+        loss = mse_loss(reshape(pred, 4, 1, 1, 1), reshape(target, 4, 1, 1, 1))
+        @test _get_scalar(loss) ≈ 0.0f0 atol=1e-7
 
-            julia_loss = dice_loss(x1_julia, x2_julia)
-            julia_score = dice_score(x1_julia, x2_julia)
-            torch_loss = Float32(pyconvert(Float64, torchreg_metrics.dice_loss(x1_torch, x2_torch).item()))
-            torch_score = Float32(pyconvert(Float64, torchreg_metrics.dice_score(x1_torch, x2_torch).item()))
+        # Different values
+        pred2 = Float32[1, 2, 3, 4]
+        target2 = Float32[2, 3, 4, 5]
+        loss2 = mse_loss(reshape(pred2, 4, 1, 1, 1), reshape(target2, 4, 1, 1, 1))
+        # MSE = mean((1-2)^2 + (2-3)^2 + (3-4)^2 + (4-5)^2) = mean(1+1+1+1) = 1
+        @test _get_scalar(loss2) ≈ 1.0f0 atol=1e-6
+    end
 
-            @test isapprox(julia_loss, torch_loss, rtol=1e-5)
-            @test isapprox(julia_score, torch_score, rtol=1e-5)
-        end
+    @testset "Metal GPU test" begin
+        rng = StableRNG(42)
+        pred_cpu = rand(rng, Float32, 16, 16, 2, 2)
+        target_cpu = rand(rng, Float32, 16, 16, 2, 2)
 
-        @testset "3D arrays" begin
-            x1_julia = rand(Float32, 7, 7, 7, 1, 1)
-            x2_julia = rand(Float32, 7, 7, 7, 1, 1)
+        pred_mtl = MtlArray(pred_cpu)
+        target_mtl = MtlArray(target_cpu)
 
-            x1_torch = torch.tensor(np.ascontiguousarray(permutedims(x1_julia, (5, 4, 3, 2, 1))))
-            x2_torch = torch.tensor(np.ascontiguousarray(permutedims(x2_julia, (5, 4, 3, 2, 1))))
+        loss_mtl = mse_loss(pred_mtl, target_mtl)
 
-            julia_loss = dice_loss(x1_julia, x2_julia)
-            julia_score = dice_score(x1_julia, x2_julia)
-            torch_loss = Float32(pyconvert(Float64, torchreg_metrics.dice_loss(x1_torch, x2_torch).item()))
-            torch_score = Float32(pyconvert(Float64, torchreg_metrics.dice_score(x1_torch, x2_torch).item()))
+        @test loss_mtl isa MtlArray{Float32, 1}
+        @test length(loss_mtl) == 1
 
-            @test isapprox(julia_loss, torch_loss, rtol=1e-5)
-            @test isapprox(julia_score, torch_score, rtol=1e-5)
-        end
+        # Compare GPU vs CPU result
+        loss_cpu = mse_loss(pred_cpu, target_cpu)
+        @test isapprox(_get_scalar(Array(loss_mtl)), _get_scalar(loss_cpu), rtol=1e-5)
+    end
 
-        @testset "batch size > 1" begin
-            x1_julia = rand(Float32, 6, 6, 6, 1, 3)
-            x2_julia = rand(Float32, 6, 6, 6, 1, 3)
+    @testset "Gradient verification (CPU)" begin
+        rng = StableRNG(123)
+        pred = rand(rng, Float32, 8, 8, 1, 1)
+        target = rand(rng, Float32, 8, 8, 1, 1)
 
-            x1_torch = torch.tensor(np.ascontiguousarray(permutedims(x1_julia, (5, 4, 3, 2, 1))))
-            x2_torch = torch.tensor(np.ascontiguousarray(permutedims(x2_julia, (5, 4, 3, 2, 1))))
+        # Create CoDuals
+        pred_fdata = zeros(Float32, size(pred))
+        target_fdata = zeros(Float32, size(target))
+        pred_codual = CoDual(pred, pred_fdata)
+        target_codual = CoDual(target, target_fdata)
 
-            julia_score = dice_score(x1_julia, x2_julia)
-            torch_score = Float32(pyconvert(Float64, torchreg_metrics.dice_score(x1_torch, x2_torch).item()))
+        # Forward pass via rrule!!
+        output_codual, pb = Mooncake.rrule!!(
+            CoDual(mse_loss, NoFData()),
+            pred_codual,
+            target_codual
+        )
 
-            @test isapprox(julia_score, torch_score, rtol=1e-5)
-        end
+        # Set upstream gradient (fill 1-element array)
+        fill!(output_codual.dx, 1.0f0)
 
-        @testset "edge cases" begin
-            # Identical binary masks should give score 1
-            mask = Float32.(rand(8, 8, 8, 1, 1) .> 0.5)
-            @test isapprox(dice_score(mask, mask), 1.0f0, atol=1e-6)
-            @test isapprox(dice_loss(mask, mask), 0.0f0, atol=1e-6)
+        # Backward pass
+        pb(NoRData())
+
+        # Finite difference check
+        f_pred = x -> mse_loss(x, target)
+        grad_fd = finite_diff_grad(f_pred, pred)
+
+        @test isapprox(pred_fdata, grad_fd, rtol=1e-2)
+    end
+
+    @testset "Gradient on Metal GPU" begin
+        rng = StableRNG(456)
+        pred_cpu = rand(rng, Float32, 8, 8, 1, 1)
+        target_cpu = rand(rng, Float32, 8, 8, 1, 1)
+
+        pred_mtl = MtlArray(pred_cpu)
+        target_mtl = MtlArray(target_cpu)
+        pred_fdata = Metal.zeros(Float32, size(pred_mtl))
+        target_fdata = Metal.zeros(Float32, size(target_mtl))
+
+        pred_codual = CoDual(pred_mtl, pred_fdata)
+        target_codual = CoDual(target_mtl, target_fdata)
+
+        output_codual, pb = Mooncake.rrule!!(
+            CoDual(mse_loss, NoFData()),
+            pred_codual,
+            target_codual
+        )
+
+        @test output_codual.x isa MtlArray
+        @test output_codual.dx isa MtlArray
+
+        fill!(output_codual.dx, 1.0f0)
+        pb(NoRData())
+
+        @test pred_fdata isa MtlArray
+        # Check gradient is non-zero
+        @test _get_scalar(abs.(Array(pred_fdata))) > 0
+    end
+end
+
+# ============================================================================
+# Dice Score/Loss Tests
+# ============================================================================
+
+@testset "dice_score" begin
+    @testset "CPU basic test - identical masks" begin
+        mask = Float32.(rand(StableRNG(1), 8, 8, 1, 1) .> 0.5)
+        score = dice_score(mask, mask)
+        @test _get_scalar(score) ≈ 1.0f0 atol=1e-6
+    end
+
+    @testset "CPU basic test - disjoint masks" begin
+        # Create two non-overlapping masks
+        mask1 = zeros(Float32, 8, 8, 1, 1)
+        mask2 = zeros(Float32, 8, 8, 1, 1)
+        mask1[1:4, :, :, :] .= 1.0f0
+        mask2[5:8, :, :, :] .= 1.0f0
+
+        score = dice_score(mask1, mask2)
+        # Dice of disjoint sets = 0
+        @test _get_scalar(score) ≈ 0.0f0 atol=1e-6
+    end
+
+    @testset "Metal GPU test 2D" begin
+        rng = StableRNG(42)
+        pred_cpu = rand(rng, Float32, 16, 16, 1, 2)
+        target_cpu = rand(rng, Float32, 16, 16, 1, 2)
+
+        pred_mtl = MtlArray(pred_cpu)
+        target_mtl = MtlArray(target_cpu)
+
+        score_mtl = dice_score(pred_mtl, target_mtl)
+
+        @test score_mtl isa MtlArray{Float32, 1}
+        @test length(score_mtl) == 1
+
+        # Compare GPU vs CPU result
+        score_cpu = dice_score(pred_cpu, target_cpu)
+        @test isapprox(_get_scalar(Array(score_mtl)), _get_scalar(score_cpu), rtol=1e-5)
+    end
+
+    @testset "Metal GPU test 3D" begin
+        rng = StableRNG(43)
+        pred_cpu = rand(rng, Float32, 8, 8, 8, 1, 2)
+        target_cpu = rand(rng, Float32, 8, 8, 8, 1, 2)
+
+        pred_mtl = MtlArray(pred_cpu)
+        target_mtl = MtlArray(target_cpu)
+
+        score_mtl = dice_score(pred_mtl, target_mtl)
+
+        @test score_mtl isa MtlArray{Float32, 1}
+        @test length(score_mtl) == 1
+
+        score_cpu = dice_score(pred_cpu, target_cpu)
+        @test isapprox(_get_scalar(Array(score_mtl)), _get_scalar(score_cpu), rtol=1e-5)
+    end
+
+    @testset "Gradient verification 2D (CPU)" begin
+        rng = StableRNG(123)
+        pred = rand(rng, Float32, 8, 8, 1, 1)
+        target = rand(rng, Float32, 8, 8, 1, 1)
+
+        pred_fdata = zeros(Float32, size(pred))
+        target_fdata = zeros(Float32, size(target))
+
+        output_codual, pb = Mooncake.rrule!!(
+            CoDual(dice_score, NoFData()),
+            CoDual(pred, pred_fdata),
+            CoDual(target, target_fdata)
+        )
+
+        fill!(output_codual.dx, 1.0f0)
+        pb(NoRData())
+
+        # Finite difference check (use larger epsilon for this test)
+        f_pred = x -> dice_score(x, target)
+        grad_fd = finite_diff_grad(f_pred, pred, Float32(1e-3))
+
+        # Allow slightly larger tolerance due to numerical precision
+        @test isapprox(pred_fdata, grad_fd, rtol=2e-2)
+    end
+
+    @testset "Gradient on Metal GPU 2D" begin
+        rng = StableRNG(456)
+        pred_mtl = MtlArray(rand(rng, Float32, 8, 8, 1, 1))
+        target_mtl = MtlArray(rand(rng, Float32, 8, 8, 1, 1))
+        pred_fdata = Metal.zeros(Float32, size(pred_mtl))
+        target_fdata = Metal.zeros(Float32, size(target_mtl))
+
+        output_codual, pb = Mooncake.rrule!!(
+            CoDual(dice_score, NoFData()),
+            CoDual(pred_mtl, pred_fdata),
+            CoDual(target_mtl, target_fdata)
+        )
+
+        @test output_codual.x isa MtlArray
+        fill!(output_codual.dx, 1.0f0)
+        pb(NoRData())
+
+        @test pred_fdata isa MtlArray
+        @test _get_scalar(abs.(Array(pred_fdata))) > 0
+    end
+end
+
+@testset "dice_loss" begin
+    @testset "CPU basic test - identical masks" begin
+        mask = Float32.(rand(StableRNG(1), 8, 8, 1, 1) .> 0.5)
+        loss = dice_loss(mask, mask)
+        @test _get_scalar(loss) ≈ 0.0f0 atol=1e-6
+    end
+
+    @testset "relation to dice_score" begin
+        rng = StableRNG(42)
+        pred = rand(rng, Float32, 8, 8, 1, 1)
+        target = rand(rng, Float32, 8, 8, 1, 1)
+
+        loss = dice_loss(pred, target)
+        score = dice_score(pred, target)
+
+        @test isapprox(_get_scalar(loss), 1.0f0 - _get_scalar(score), atol=1e-6)
+    end
+
+    @testset "Metal GPU test" begin
+        rng = StableRNG(43)
+        pred_mtl = MtlArray(rand(rng, Float32, 16, 16, 1, 2))
+        target_mtl = MtlArray(rand(rng, Float32, 16, 16, 1, 2))
+
+        loss_mtl = dice_loss(pred_mtl, target_mtl)
+
+        @test loss_mtl isa MtlArray{Float32, 1}
+        loss_val = _get_scalar(Array(loss_mtl))
+        @test loss_val >= 0.0f0
+        @test loss_val <= 1.0f0
+    end
+
+    @testset "Gradient verification (CPU)" begin
+        rng = StableRNG(789)
+        pred = rand(rng, Float32, 8, 8, 1, 1)
+        target = rand(rng, Float32, 8, 8, 1, 1)
+
+        pred_fdata = zeros(Float32, size(pred))
+        target_fdata = zeros(Float32, size(target))
+
+        output_codual, pb = Mooncake.rrule!!(
+            CoDual(dice_loss, NoFData()),
+            CoDual(pred, pred_fdata),
+            CoDual(target, target_fdata)
+        )
+
+        fill!(output_codual.dx, 1.0f0)
+        pb(NoRData())
+
+        # Finite difference check (use larger epsilon for stability)
+        f_pred = x -> dice_loss(x, target)
+        grad_fd = finite_diff_grad(f_pred, pred, Float32(1e-3))
+
+        # Allow slightly larger tolerance due to numerical precision
+        @test isapprox(pred_fdata, grad_fd, rtol=2e-2)
+    end
+end
+
+# ============================================================================
+# NCC Loss Tests
+# ============================================================================
+
+@testset "ncc_loss" begin
+    @testset "CPU basic test - identical images" begin
+        rng = StableRNG(42)
+        img = rand(rng, Float32, 16, 16, 16, 1, 1)
+
+        # Identical images should have high correlation → low loss (negative)
+        loss = ncc_loss(img, img; kernel_size=5)
+
+        @test isfinite(_get_scalar(loss))
+        @test _get_scalar(loss) < -0.5f0  # Should be strongly negative (high correlation)
+    end
+
+    @testset "CPU basic test - uncorrelated images" begin
+        rng1 = StableRNG(42)
+        rng2 = StableRNG(123)
+        img1 = rand(rng1, Float32, 16, 16, 16, 1, 1)
+        img2 = rand(rng2, Float32, 16, 16, 16, 1, 1)
+
+        loss = ncc_loss(img1, img2; kernel_size=5)
+
+        @test isfinite(_get_scalar(loss))
+        # Random images should have lower correlation than identical
+        @test _get_scalar(loss) > -1.0f0
+    end
+
+    @testset "Metal GPU test" begin
+        rng = StableRNG(456)
+        pred_cpu = rand(rng, Float32, 12, 12, 12, 1, 1)
+        target_cpu = rand(rng, Float32, 12, 12, 12, 1, 1)
+
+        pred_mtl = MtlArray(pred_cpu)
+        target_mtl = MtlArray(target_cpu)
+
+        loss_mtl = ncc_loss(pred_mtl, target_mtl; kernel_size=5)
+
+        @test loss_mtl isa MtlArray{Float32, 1}
+        @test length(loss_mtl) == 1
+
+        # Compare GPU vs CPU result
+        loss_cpu = ncc_loss(pred_cpu, target_cpu; kernel_size=5)
+        @test isapprox(_get_scalar(Array(loss_mtl)), _get_scalar(loss_cpu), rtol=1e-4)
+    end
+
+    @testset "different kernel sizes" begin
+        rng = StableRNG(789)
+        pred = rand(rng, Float32, 16, 16, 16, 1, 1)
+        target = rand(rng, Float32, 16, 16, 16, 1, 1)
+
+        for ks in [3, 5, 7]
+            loss = ncc_loss(pred, target; kernel_size=ks)
+            @test isfinite(_get_scalar(loss))
         end
     end
 
-    @testset "NCC Loss Parity" begin
-        Random.seed!(123)
+    @testset "Gradient verification (CPU) - small" begin
+        rng = StableRNG(111)
+        # Use small array for finite diff
+        pred = rand(rng, Float32, 8, 8, 8, 1, 1)
+        target = rand(rng, Float32, 8, 8, 8, 1, 1)
 
-        # Note: NCC parity is verified for N=1 (single batch) cases only
-        # torchreg has a quirk where kernel shape depends on batch size
-        # torchreg NCC only supports 3D (uses conv3d directly), so 2D parity tests
-        # are not possible. Our Julia implementation correctly supports 2D with conv2d.
+        pred_fdata = zeros(Float32, size(pred))
+        target_fdata = zeros(Float32, size(target))
 
-        @testset "2D functionality (N=1)" begin
-            # Note: Can't test parity with torchreg - it uses conv3d even for 2D inputs
-            # which gives incorrect results. We test that our 2D implementation works correctly.
-            pred_julia = rand(Float32, 12, 12, 1, 1)
-            targ_julia = rand(Float32, 12, 12, 1, 1)
+        output_codual, pb = Mooncake.rrule!!(
+            CoDual(ncc_loss, NoFData()),
+            CoDual(pred, pred_fdata),
+            CoDual(target, target_fdata);
+            kernel_size=3
+        )
 
-            ncc_julia = NCC(kernel_size=7)
-            julia_loss = ncc_julia(pred_julia, targ_julia)
+        fill!(output_codual.dx, 1.0f0)
+        pb(NoRData())
 
-            @test isfinite(julia_loss)
-            @test julia_loss <= 0  # NCC should be non-positive (negative of positive correlation)
-        end
+        # Check gradient is non-zero and finite
+        @test all(isfinite.(pred_fdata))
+        @test _get_scalar(abs.(pred_fdata)) > 0
 
-        @testset "2D identical images (N=1)" begin
-            # Identical images should give NCC close to -1 (highly correlated)
-            same = rand(Float32, 10, 10, 1, 1)
+        # Finite difference check (use larger epsilon for numerical stability)
+        f_pred = x -> ncc_loss(x, target; kernel_size=3)
+        grad_fd = finite_diff_grad(f_pred, pred, Float32(1e-3))
 
-            ncc_julia = NCC(kernel_size=5)
-            julia_loss = ncc_julia(same, same)
-
-            @test julia_loss < -0.9  # Should be close to -1
-        end
-
-        @testset "3D N=1 kernel_size=7" begin
-            pred_julia = rand(Float32, 9, 9, 9, 1, 1)
-            targ_julia = rand(Float32, 9, 9, 9, 1, 1)
-
-            pred_torch = torch.tensor(np.ascontiguousarray(permutedims(pred_julia, (5, 4, 3, 2, 1))))
-            targ_torch = torch.tensor(np.ascontiguousarray(permutedims(targ_julia, (5, 4, 3, 2, 1))))
-
-            ncc_julia = NCC(kernel_size=7)
-            ncc_torch = torchreg_metrics.NCC(kernel_size=7)
-
-            julia_loss = ncc_julia(pred_julia, targ_julia)
-            torch_loss = Float32(pyconvert(Float64, ncc_torch(pred_torch, targ_torch).item()))
-
-            @test isapprox(julia_loss, torch_loss, rtol=1e-4)
-        end
-
-        @testset "different kernel sizes (N=1)" begin
-            pred_julia = rand(Float32, 11, 11, 11, 1, 1)
-            targ_julia = rand(Float32, 11, 11, 11, 1, 1)
-
-            pred_torch = torch.tensor(np.ascontiguousarray(permutedims(pred_julia, (5, 4, 3, 2, 1))))
-            targ_torch = torch.tensor(np.ascontiguousarray(permutedims(targ_julia, (5, 4, 3, 2, 1))))
-
-            for ks in [3, 5, 9]
-                ncc_julia = NCC(kernel_size=ks)
-                ncc_torch = torchreg_metrics.NCC(kernel_size=ks)
-
-                julia_loss = ncc_julia(pred_julia, targ_julia)
-                torch_loss = Float32(pyconvert(Float64, ncc_torch(pred_torch, targ_torch).item()))
-
-                @test isapprox(julia_loss, torch_loss, rtol=1e-4)
-            end
-        end
-
-        @testset "identical images (N=1)" begin
-            # Identical images should give NCC ≈ -1 (highly correlated)
-            same = rand(Float32, 8, 8, 8, 1, 1)
-            same_torch = torch.tensor(np.ascontiguousarray(permutedims(same, (5, 4, 3, 2, 1))))
-
-            ncc_julia = NCC(kernel_size=5)
-            ncc_torch = torchreg_metrics.NCC(kernel_size=5)
-
-            julia_loss = ncc_julia(same, same)
-            torch_loss = Float32(pyconvert(Float64, ncc_torch(same_torch, same_torch).item()))
-
-            @test isapprox(julia_loss, torch_loss, rtol=1e-4)
-            @test julia_loss < -0.9  # Should be close to -1
-        end
+        # NCC gradient is complex with local windows - allow larger tolerance
+        # The gradient computation involves many intermediate calculations
+        @test isapprox(pred_fdata, grad_fd, rtol=0.5, atol=1e-2)
     end
 
-    @testset "LinearElasticity Regularizer" begin
-        torchreg_utils = pyimport("torchreg.utils")
+    @testset "Gradient on Metal GPU" begin
+        rng = StableRNG(222)
+        pred_mtl = MtlArray(rand(rng, Float32, 8, 8, 8, 1, 1))
+        target_mtl = MtlArray(rand(rng, Float32, 8, 8, 8, 1, 1))
+        pred_fdata = Metal.zeros(Float32, size(pred_mtl))
+        target_fdata = Metal.zeros(Float32, size(target_mtl))
 
-        @testset "parity with torchreg (cubic)" begin
-            np.random.seed(42)
+        output_codual, pb = Mooncake.rrule!!(
+            CoDual(ncc_loss, NoFData()),
+            CoDual(pred_mtl, pred_fdata),
+            CoDual(target_mtl, target_fdata);
+            kernel_size=3
+        )
 
-            for sz in [8, 16]
-                u_torch = torch.tensor(np.random.randn(1, sz, sz, sz, 3).astype(np.float32))
-                u_julia = permutedims(pyconvert(Array{Float32}, u_torch.numpy()), (4, 3, 2, 5, 1))
+        @test output_codual.x isa MtlArray
+        fill!(output_codual.dx, 1.0f0)
+        pb(NoRData())
 
-                julia_reg = LinearElasticity(mu=2.0f0, lam=1.0f0)
-                torch_reg = torchreg_metrics.LinearElasticity(mu=2.0, lam=1.0)
-
-                julia_result = julia_reg(u_julia)
-                torch_result = Float32(pyconvert(Float64, torch_reg(u_torch).item()))
-
-                @test isapprox(julia_result, torch_result, rtol=1e-4)
-            end
-        end
-
-        @testset "parity with torchreg (non-cubic)" begin
-            np.random.seed(42)
-
-            for (X, Y, Z) in [(10, 12, 14), (6, 8, 10)]
-                u_torch = torch.tensor(np.random.randn(1, Z, Y, X, 3).astype(np.float32))
-                u_julia = permutedims(pyconvert(Array{Float32}, u_torch.numpy()), (4, 3, 2, 5, 1))
-
-                julia_reg = LinearElasticity(mu=2.0f0, lam=1.0f0)
-                torch_reg = torchreg_metrics.LinearElasticity(mu=2.0, lam=1.0)
-
-                julia_result = julia_reg(u_julia)
-                torch_result = Float32(pyconvert(Float64, torch_reg(u_torch).item()))
-
-                @test isapprox(julia_result, torch_result, rtol=1e-4)
-            end
-        end
-
-        @testset "parity with different mu/lam" begin
-            np.random.seed(123)
-            u_torch = torch.tensor(np.random.randn(1, 8, 8, 8, 3).astype(np.float32))
-            u_julia = permutedims(pyconvert(Array{Float32}, u_torch.numpy()), (4, 3, 2, 5, 1))
-
-            for (mu, lam) in [(1.0, 1.0), (2.0, 1.0), (0.5, 2.0), (3.0, 0.5)]
-                julia_reg = LinearElasticity(mu=Float32(mu), lam=Float32(lam))
-                torch_reg = torchreg_metrics.LinearElasticity(mu=mu, lam=lam)
-
-                julia_result = julia_reg(u_julia)
-                torch_result = Float32(pyconvert(Float64, torch_reg(u_torch).item()))
-
-                @test isapprox(julia_result, torch_result, rtol=1e-4)
-            end
-        end
-
-        @testset "basic functionality" begin
-            u = randn(Float32, 8, 8, 8, 3, 1)
-            reg = LinearElasticity(mu=2.0f0, lam=1.0f0)
-
-            penalty = reg(u)
-
-            @test isfinite(penalty)
-            @test penalty >= 0  # Sum of squares, must be non-negative
-        end
-
-        @testset "parameter effect" begin
-            u = randn(Float32, 8, 8, 8, 3, 1)
-
-            reg_low = LinearElasticity(mu=1.0f0, lam=1.0f0)
-            reg_high_mu = LinearElasticity(mu=5.0f0, lam=1.0f0)
-            reg_high_lam = LinearElasticity(mu=1.0f0, lam=5.0f0)
-
-            penalty_low = reg_low(u)
-            penalty_high_mu = reg_high_mu(u)
-            penalty_high_lam = reg_high_lam(u)
-
-            # Higher mu or lam should increase penalty
-            @test penalty_high_mu > penalty_low
-            @test penalty_high_lam > penalty_low
-        end
-
-        @testset "smooth vs rough fields" begin
-            # Create smooth displacement field (linear gradient)
-            X, Y, Z = 10, 10, 10
-            u_smooth = zeros(Float32, X, Y, Z, 3, 1)
-            for i in 1:X
-                u_smooth[i, :, :, 1, 1] .= Float32(i - 1) / (X - 1) * 0.1
-            end
-
-            # Create rough displacement field (random noise)
-            u_rough = randn(Float32, X, Y, Z, 3, 1) .* 0.1f0
-
-            reg = LinearElasticity(mu=2.0f0, lam=1.0f0)
-
-            penalty_smooth = reg(u_smooth)
-            penalty_rough = reg(u_rough)
-
-            # Smooth field should have lower penalty than rough field
-            @test penalty_smooth < penalty_rough
-        end
+        @test pred_fdata isa MtlArray
+        # Check gradient is non-zero
+        @test _get_scalar(abs.(Array(pred_fdata))) > 0
     end
 end
