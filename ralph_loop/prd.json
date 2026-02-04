@@ -602,7 +602,7 @@
       "id": "RESEARCH-INITIAL-ALIGNMENT-001",
       "type": "RESEARCH",
       "title": "Research initial alignment strategies for mismatched FOV",
-      "status": "pending",
+      "status": "done",
       "priority": 28,
       "blockedBy": ["RESEARCH-ANTS-PREPROCESS-001"],
       "description": "Deep dive into initial alignment for our specific case: CCTA (tight FOV, 0.5mm, contrast) vs Non-contrast (wide FOV, 3mm, no contrast). The images are in different physical spaces. Without initial alignment, optimization can't even start properly. Research how to use DICOM headers, center-of-mass, and overlap regions. IMPORTANT: Update the implementation stories based on findings.",
@@ -629,7 +629,7 @@
       "id": "IMPL-PREPROCESS-001",
       "type": "IMPL",
       "title": "Implement preprocessing pipeline for clinical CT registration",
-      "status": "pending",
+      "status": "done",
       "priority": 29,
       "blockedBy": ["RESEARCH-INITIAL-ALIGNMENT-001"],
       "description": "Implement the preprocessing steps identified in ANTs research. This is CRITICAL - without proper preprocessing, registration fails because gradient descent cannot escape local minimum when starting from grossly misaligned images. The preprocessing pipeline must: 1) Compute center of mass for intensity-weighted alignment, 2) Detect FOV overlap since CCTA is a subset of non-contrast FOV, 3) Align image centers before optimization, 4) Resample to common space. All operations must work on GPU with MtlArrays.",
@@ -674,7 +674,10 @@
         "Test: compute_overlap_region returns nothing for non-overlapping images",
         "Test: crop_to_overlap produces image with correct physical extent",
         "Test: Full pipeline makes images visually overlap (checkerboard should show alignment)",
-        "Test: All operations preserve MtlArray type (stay on GPU)"
+        "Test: All operations preserve MtlArray type (stay on GPU)",
+        "Test: center_of_mass handles anisotropic spacing (e.g., 0.5mm x 0.5mm x 3mm)",
+        "Test: align_centers tolerance within 0.1mm after alignment",
+        "Test: Synthetic cardiac CT scenario - tight FOV (180mm) inside wide FOV (350mm) works correctly"
       ],
       "files": ["src/preprocess.jl", "test/test_preprocess.jl"]
     },

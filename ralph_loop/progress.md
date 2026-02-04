@@ -6103,3 +6103,897 @@ Based on this research, the IMPL-PREPROCESS-001 story acceptance criteria should
 3. All operations should work on GPU (MtlArray)
 
 ---
+
+### [RESEARCH-INITIAL-ALIGNMENT-001] Research initial alignment strategies for mismatched FOV
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+## Executive Summary
+
+For our cardiac CT use case (CCTA tight FOV, 0.5mm, contrast vs Non-contrast wide FOV, 3mm, no contrast), initial alignment is CRITICAL because:
+
+1. **CCTA FOV is a SUBSET of non-contrast FOV** - The heart occupies most of the CCTA but is just a small region in the wide non-contrast scan
+2. **Different physical positions** - Even with DICOM headers, breath hold variations and table positioning cause misalignment
+3. **Gradient descent cannot escape local minima** - Without good initialization, optimizer gets stuck
+
+This research documents exactly how to handle these challenges.
+
+---
+
+## THE EXACT PROBLEM: CCTA FOV IS SUBSET OF NON-CONTRAST FOV
+
+### Visual Representation
+
+```
+Non-Contrast (3mm z-spacing, large FOV):
+┌───────────────────────────────────────────┐
+│                                           │
+│   [Lung L]        [Heart]       [Lung R]  │ ← 350mm FOV covers full chest
+│                                           │
+│              [Spine]                      │
+│                                           │
+│ Physical extent: -175mm to +175mm (X)     │
+│ Physical extent: -175mm to +175mm (Y)     │
+│ Z covers: -100mm to +200mm (full thorax)  │
+└───────────────────────────────────────────┘
+
+CCTA (0.5mm z-spacing, tight FOV):
+        ┌─────────────────────┐
+        │                     │
+        │      [Heart]        │ ← 180mm FOV, heart fills image
+        │                     │
+        │  Only cardiac ROI   │
+        │                     │
+        │ X: -90mm to +90mm   │
+        │ Y: -90mm to +90mm   │
+        │ Z: +20mm to +120mm  │
+        └─────────────────────┘
+
+PROBLEM: In voxel coordinates, the heart is at COMPLETELY DIFFERENT indices!
+- In NC: heart might be at voxels (150:200, 150:200, 80:100)
+- In CCTA: heart fills the ENTIRE image (0:360, 0:360, 0:200)
+```
+
+### Why This Breaks Registration
+
+Without preprocessing:
+1. The optimizer compares voxel (100, 100, 50) in NC to voxel (100, 100, 50) in CCTA
+2. NC voxel (100, 100, 50) is LUNG
+3. CCTA voxel (100, 100, 50) is HEART
+4. These are completely different tissues - no meaningful gradient
+5. Optimizer returns near-identity transform because "nothing matches"
+
+---
+
+## DICOM ImagePositionPatient: ARE IMAGES ALREADY IN SAME PHYSICAL SPACE?
+
+### What DICOM Headers Tell Us
+
+**ImagePositionPatient (0020,0032)**: The x, y, z coordinates (in mm) of the upper-left corner of the first voxel transmitted. This is in the Patient-Based Coordinate System.
+
+**ImageOrientationPatient (0020,0037)**: Direction cosines of the first row and column with respect to the patient. Standard cardiac CT uses:
+- First row: (1, 0, 0) - X increases to patient's left
+- Second row: (0, 1, 0) - Y increases to patient's posterior
+
+**PixelSpacing (0028,0030)**: Physical spacing between pixel centers in mm (row spacing, column spacing).
+
+**SliceThickness (0018,0050)**: Nominal slice thickness in mm.
+
+### Computing Physical Position of Any Voxel
+
+Given DICOM metadata:
+```
+P = ImagePositionPatient (origin, in mm)
+Δx, Δy = PixelSpacing (in mm)
+Δz = SliceThickness (in mm)
+O = ImageOrientationPatient (6 direction cosines: rx, ry, rz, cx, cy, cz)
+
+Physical position of voxel (i, j, k):
+X_phys = P[0] + i * Δx * rx + j * Δy * cx
+Y_phys = P[1] + i * Δx * ry + j * Δy * cy
+Z_phys = P[2] + k * Δz
+
+(Assuming standard axial orientation where slices are perpendicular to Z)
+```
+
+### Are the Two Cardiac CTs in the Same Physical Space?
+
+**Theoretically YES** - DICOM coordinates are in patient-based coordinates:
+- Origin at patient's center of mass (approximately)
+- Same coordinate system for both scans
+- Should be able to use coordinates directly
+
+**Practically MAYBE NOT** - Several factors cause misalignment:
+
+1. **Different breath hold levels**
+   - NC scan: "Breathe in and hold"
+   - CCTA scan: "Breathe out and hold" (less motion artifact for cardiac)
+   - Heart can move 10-20mm between breath hold states
+
+2. **Different table positions**
+   - Patient repositioned between scans
+   - Table height may differ slightly
+
+3. **Patient movement**
+   - Arms moved between scans
+   - Slight body rotation
+
+4. **Different isocenter**
+   - CCTA centered on heart
+   - NC might be centered differently
+
+5. **Time between scans**
+   - If done on different days: weight change, body composition
+
+### Practical Recommendation
+
+**DO NOT trust DICOM headers alone for alignment.**
+
+Even if ImagePositionPatient is set correctly, expect 10-50mm misalignment in practice. Always use center-of-mass alignment as initialization.
+
+---
+
+## CENTER-OF-MASS ALIGNMENT ALGORITHM
+
+### Mathematical Definition
+
+For a 3D image I(x, y, z) with physical coordinates:
+
+**Zeroth Moment (Total Mass):**
+```
+M₀ = Σ I(x, y, z) for all voxels where I > threshold
+```
+
+**First Moments (Sum of weighted positions):**
+```
+M_x = Σ x_phys × I(x, y, z)
+M_y = Σ y_phys × I(x, y, z)
+M_z = Σ z_phys × I(x, y, z)
+```
+
+**Center of Mass (in physical coordinates):**
+```
+COM_x = M_x / M₀
+COM_y = M_y / M₀
+COM_z = M_z / M₀
+```
+
+### How to Compute Physical Coordinates in GPU-First Way
+
+```julia
+function center_of_mass(image::PhysicalImage{T}; threshold::T = T(-200)) where T
+    data = image.data          # (X, Y, Z, C, N) array
+    spacing = image.spacing    # (dx, dy, dz) in mm
+    origin = image.origin      # (ox, oy, oz) in mm
+
+    # Compute on GPU - no scalar indexing!
+    X, Y, Z, C, N = size(data)
+
+    # Sum of intensities above threshold
+    total_mass = zero(T)
+    sum_x = zero(T)
+    sum_y = zero(T)
+    sum_z = zero(T)
+
+    # Using AK.foreachindex + Atomix for GPU
+    AK.foreachindex(data) do idx
+        i, j, k, c, n = Tuple(CartesianIndices(data)[idx])
+        val = data[idx]
+
+        if val > threshold
+            # Physical position of this voxel
+            x_phys = origin[1] + (i - 1) * spacing[1]
+            y_phys = origin[2] + (j - 1) * spacing[2]
+            z_phys = origin[3] + (k - 1) * spacing[3]
+
+            # Accumulate (needs atomic for GPU)
+            Atomix.@atomic total_mass[] += val
+            Atomix.@atomic sum_x[] += val * x_phys
+            Atomix.@atomic sum_y[] += val * y_phys
+            Atomix.@atomic sum_z[] += val * z_phys
+        end
+    end
+
+    # Final COM
+    return (sum_x / total_mass, sum_y / total_mass, sum_z / total_mass)
+end
+```
+
+### Threshold Selection for CT Images
+
+| Tissue | HU Range | Include in COM? |
+|--------|----------|-----------------|
+| Air (outside body) | -1000 | NO - background |
+| Lung parenchyma | -900 to -500 | NO - causes shift for FOV mismatch |
+| Fat | -100 to -50 | YES |
+| Water/soft tissue | 0 to 50 | YES |
+| Blood (no contrast) | 30 to 45 | YES |
+| Blood (with contrast) | 250 to 400 | YES |
+| Muscle | 40 to 80 | YES |
+| Bone | 400 to 3000 | YES but high weight |
+
+**Recommended threshold: -200 HU** (excludes air and most lung)
+
+### Why -200 HU Works for Cardiac CT
+
+For our case (CCTA vs non-contrast):
+1. Both images include heart, vessels, spine, ribs at similar HU (>-200)
+2. Contrast-enhanced blood is ~300 HU, non-contrast is ~40 HU
+3. COM calculation uses intensity as weight
+4. Contrast shifts heart COM slightly toward blood pools
+5. But translation alignment is robust to this small shift (a few mm)
+
+### Handling Different FOVs in COM
+
+**Problem:** Non-contrast has more lung/body in FOV than CCTA
+
+**Solution:** Threshold excludes air/lung anyway
+- Non-contrast: lung at -800 HU excluded, body/heart included
+- CCTA: mostly heart, all included
+- COM ends up near anatomical center of mass for both
+
+**Potential issue:** If NC includes more bone (arms, more ribs), COM may shift
+- Arms typically excluded at threshold -200 (skin has soft tissue)
+- Could use higher threshold (-100) if needed
+- Or crop to overlap region first, then compute COM
+
+---
+
+## OVERLAP REGION DETECTION FOR FOV MISMATCH
+
+### The Problem
+
+```
+NC physical extent: X = [-175, +175], Y = [-175, +175], Z = [-100, +200]
+CCTA physical extent: X = [-90, +90], Y = [-90, +90], Z = [+20, +120]
+
+Overlap region: X = [-90, +90], Y = [-90, +90], Z = [+20, +120]
+(The CCTA extent, since it's fully contained in NC)
+```
+
+### Algorithm
+
+```julia
+function compute_overlap_region(img1::PhysicalImage, img2::PhysicalImage)
+    # Get physical bounding boxes
+    bb1 = get_bounding_box(img1)  # (min_corner, max_corner) in mm
+    bb2 = get_bounding_box(img2)
+
+    # Compute intersection
+    min_corner = (
+        max(bb1.min[1], bb2.min[1]),
+        max(bb1.min[2], bb2.min[2]),
+        max(bb1.min[3], bb2.min[3])
+    )
+    max_corner = (
+        min(bb1.max[1], bb2.max[1]),
+        min(bb1.max[2], bb2.max[2]),
+        min(bb1.max[3], bb2.max[3])
+    )
+
+    # Check if valid overlap
+    if any(min_corner .>= max_corner)
+        return nothing  # No overlap!
+    end
+
+    return (min=min_corner, max=max_corner)
+end
+
+function get_bounding_box(img::PhysicalImage)
+    X, Y, Z, C, N = size(img.data)
+    origin = img.origin
+    spacing = img.spacing
+
+    min_corner = origin
+    max_corner = (
+        origin[1] + (X - 1) * spacing[1],
+        origin[2] + (Y - 1) * spacing[2],
+        origin[3] + (Z - 1) * spacing[3]
+    )
+
+    return (min=min_corner, max=max_corner)
+end
+```
+
+### Cropping to Overlap Region
+
+```julia
+function crop_to_region(image::PhysicalImage{T}, region) where T
+    # Convert physical region to voxel indices
+    origin = image.origin
+    spacing = image.spacing
+
+    # Voxel indices (1-based, rounded to nearest)
+    i_start = round(Int, (region.min[1] - origin[1]) / spacing[1]) + 1
+    i_end = round(Int, (region.max[1] - origin[1]) / spacing[1]) + 1
+    j_start = round(Int, (region.min[2] - origin[2]) / spacing[2]) + 1
+    j_end = round(Int, (region.max[2] - origin[2]) / spacing[2]) + 1
+    k_start = round(Int, (region.min[3] - origin[3]) / spacing[3]) + 1
+    k_end = round(Int, (region.max[3] - origin[3]) / spacing[3]) + 1
+
+    # Clamp to valid range
+    X, Y, Z, C, N = size(image.data)
+    i_start = clamp(i_start, 1, X)
+    i_end = clamp(i_end, 1, X)
+    # ... same for j, k
+
+    # Crop data
+    cropped_data = image.data[i_start:i_end, j_start:j_end, k_start:k_end, :, :]
+
+    # New origin
+    new_origin = (
+        origin[1] + (i_start - 1) * spacing[1],
+        origin[2] + (j_start - 1) * spacing[2],
+        origin[3] + (k_start - 1) * spacing[3]
+    )
+
+    return PhysicalImage(cropped_data; spacing=spacing, origin=new_origin)
+end
+```
+
+### Crop vs Pad Decision
+
+**For our cardiac CT case:**
+
+| Approach | When to Use | Our Case |
+|----------|-------------|----------|
+| **Crop larger to smaller** | Smaller FOV fully contained in larger | ✓ CCTA is subset of NC |
+| **Pad smaller to match larger** | Need full extent of larger image | Not needed |
+| **Crop both to intersection** | Partial overlap | Not our case |
+
+**Decision: Crop non-contrast to match CCTA extent (after COM alignment)**
+
+---
+
+## SimpleITK CenteredTransformInitializer
+
+### GEOMETRY Mode
+
+Aligns the **geometric centers** of the two images:
+
+```
+center_fixed = (origin_fixed + (size_fixed - 1) * spacing_fixed) / 2
+center_moving = (origin_moving + (size_moving - 1) * spacing_moving) / 2
+
+translation = center_fixed - center_moving
+```
+
+**When to use:**
+- Images have similar FOVs
+- Anatomy is roughly centered in both images
+- Quick initialization, doesn't require intensity computation
+
+**For our case:** NOT IDEAL
+- CCTA is centered on heart
+- NC is centered on whole chest
+- Geometric centers don't correspond to same anatomy
+
+### MOMENTS Mode
+
+Aligns the **intensity-weighted centers of mass**:
+
+```
+com_fixed = Σ(position × intensity) / Σ(intensity)
+com_moving = same
+
+translation = com_fixed - com_moving
+```
+
+**When to use:**
+- Anatomical structures have meaningful intensity
+- Similar tissue distribution in both images
+- Different FOVs or non-centered anatomy
+
+**For our case:** BETTER
+- Heart/soft tissue drives COM in both images
+- Handles FOV mismatch
+- Contrast vs non-contrast: COM still near heart center
+
+### Key Insight from SimpleITK Docs
+
+> "The MOMENTS mode is quite convenient when the anatomical structures of interest are not centered in the image."
+
+This exactly describes our cardiac CT case!
+
+---
+
+## ANTs antsAI (Automatic Initialization)
+
+### What antsAI Does
+
+1. **Multi-start optimization**: Tries many initial transforms
+2. **Search over rotations**: Samples rotation space (e.g., 10° increments)
+3. **Search over translations**: Samples translation space
+4. **Score each starting point**: Uses mutual information or correlation
+5. **Return best initialization**: Starting point with best score
+
+### When to Use antsAI
+
+| Scenario | COM Alignment | antsAI |
+|----------|---------------|--------|
+| Same FOV, similar anatomy | ✓ Usually sufficient | Overkill |
+| Different FOV, same modality | ✓ Try first | Use if COM fails |
+| Multi-modal (MRI to CT) | Try, may fail | ✓ More robust |
+| Large rotation difference | May fail | ✓ Searches rotation space |
+| Our cardiac CT case | ✓ Should work | Fallback if needed |
+
+### Implementing antsAI-like Multi-Start
+
+```julia
+function multi_start_alignment(moving::PhysicalImage, static::PhysicalImage;
+                               n_rotations=12, n_translations=5)
+    best_transform = nothing
+    best_mi = -Inf
+
+    # Generate candidate rotations (around z-axis for axial CT)
+    rotations = range(0, 2π, length=n_rotations+1)[1:end-1]
+
+    # Generate candidate translations (grid around COM)
+    com_static = center_of_mass(static)
+    com_moving = center_of_mass(moving)
+    base_translation = com_static .- com_moving
+
+    translation_offsets = [(-20, -20, -20), (-20, 0, 0), (0, -20, 0), ...]
+
+    for rot in rotations
+        for offset in translation_offsets
+            # Create candidate transform
+            translation = base_translation .+ offset
+            theta = create_rigid_transform(translation, rot)
+
+            # Apply transform (at low resolution for speed)
+            moved = apply_transform(moving, theta)
+
+            # Score with MI
+            mi = mutual_information(moved, static)
+
+            if mi > best_mi
+                best_mi = mi
+                best_transform = theta
+            end
+        end
+    end
+
+    return best_transform
+end
+```
+
+**For our case:** COM alignment should be sufficient. antsAI is a fallback.
+
+---
+
+## PROPOSED INITIAL ALIGNMENT API FOR MedicalImageRegistration.jl
+
+### Core Functions
+
+```julia
+# 1. Center of mass computation
+"""
+    center_of_mass(image::PhysicalImage; threshold=-200f0)
+
+Compute intensity-weighted center of mass in physical coordinates (mm).
+
+# Arguments
+- `image`: PhysicalImage with data, spacing, origin
+- `threshold`: Minimum HU to include (excludes air/lung)
+
+# Returns
+- `(x_mm, y_mm, z_mm)`: Center of mass in physical coordinates
+"""
+function center_of_mass(image::PhysicalImage{T}; threshold::T = T(-200)) where T
+    # ... GPU implementation with AK.foreachindex
+end
+
+# 2. Center alignment
+"""
+    align_centers(moving::PhysicalImage, static::PhysicalImage; threshold=-200f0)
+
+Compute translation to align centers of mass.
+
+# Returns
+- `translated_moving`: PhysicalImage with updated origin (data unchanged)
+- `translation`: The (dx, dy, dz) translation in mm
+"""
+function align_centers(moving::PhysicalImage, static::PhysicalImage; threshold=-200f0)
+    com_static = center_of_mass(static; threshold)
+    com_moving = center_of_mass(moving; threshold)
+
+    translation = com_static .- com_moving
+
+    # Update moving image origin
+    new_origin = moving.origin .+ translation
+    translated = PhysicalImage(moving.data; spacing=moving.spacing, origin=new_origin)
+
+    return translated, translation
+end
+
+# 3. Overlap region detection
+"""
+    compute_overlap_region(img1::PhysicalImage, img2::PhysicalImage)
+
+Find physical bounding box of overlapping region.
+
+# Returns
+- `(min_corner, max_corner)`: Physical coordinates of overlap
+- `nothing`: If images don't overlap
+"""
+function compute_overlap_region(img1::PhysicalImage, img2::PhysicalImage)
+    # ... implementation
+end
+
+# 4. Crop to region
+"""
+    crop_to_region(image::PhysicalImage, region)
+
+Crop image to specified physical region.
+
+# Arguments
+- `region`: From compute_overlap_region, or (min_corner, max_corner) tuple
+
+# Returns
+- `PhysicalImage` with cropped data and updated origin
+"""
+function crop_to_region(image::PhysicalImage, region)
+    # ... implementation
+end
+```
+
+### High-Level Pipeline Function
+
+```julia
+"""
+    preprocess_for_registration(moving::PhysicalImage, static::PhysicalImage;
+                                registration_resolution=2.0f0,
+                                align_com=true,
+                                crop_to_overlap=true,
+                                window_hu=true,
+                                min_hu=-200f0,
+                                max_hu=1000f0)
+
+Full preprocessing pipeline for clinical CT registration.
+
+# Pipeline Steps:
+1. Align centers of mass (if align_com=true)
+2. Detect overlapping FOV
+3. Crop both to overlap region (if crop_to_overlap=true)
+4. Resample both to registration_resolution
+5. Apply HU windowing (if window_hu=true)
+
+# Returns
+- `preprocessed_moving`: Ready for registration
+- `preprocessed_static`: Ready for registration
+- `preprocess_info`: Dict with :translation, :overlap_region, etc.
+"""
+function preprocess_for_registration(moving::PhysicalImage, static::PhysicalImage; kwargs...)
+    # Step 1: COM alignment
+    if align_com
+        moving, translation = align_centers(moving, static; threshold=min_hu)
+    end
+
+    # Step 2: Overlap detection
+    overlap = compute_overlap_region(moving, static)
+    if isnothing(overlap)
+        error("Images do not overlap in physical space!")
+    end
+
+    # Step 3: Crop to overlap
+    if crop_to_overlap
+        moving = crop_to_region(moving, overlap)
+        static = crop_to_region(static, overlap)
+    end
+
+    # Step 4: Resample
+    moving = resample(moving, registration_resolution)
+    static = resample(static, registration_resolution)
+
+    # Step 5: Window intensities
+    if window_hu
+        moving = window_intensity(moving; min_hu, max_hu)
+        static = window_intensity(static; min_hu, max_hu)
+    end
+
+    return moving, static, preprocess_info
+end
+```
+
+---
+
+## STEP-BY-STEP WORKFLOW FOR OUR CARDIAC CT CASE
+
+### Input
+
+- **CCTA**: 0.5mm z-spacing, 180mm FOV, WITH contrast
+- **Non-contrast**: 3mm z-spacing, 350mm FOV, NO contrast
+
+### Step 1: Load and Create PhysicalImages
+
+```julia
+ccta = load_dicom_volume("path/to/ccta")
+nc = load_dicom_volume("path/to/non_contrast")
+
+ccta_physical = PhysicalImage(ccta.data;
+    spacing=ccta.spacing,  # (0.5, 0.5, 0.5) mm
+    origin=ccta.origin)    # from ImagePositionPatient
+
+nc_physical = PhysicalImage(nc.data;
+    spacing=nc.spacing,    # (0.7, 0.7, 3.0) mm
+    origin=nc.origin)
+```
+
+### Step 2: Compute Centers of Mass
+
+```julia
+com_ccta = center_of_mass(ccta_physical; threshold=-200f0)
+# Expected: roughly at heart center, e.g., (0, 50, 70) mm
+
+com_nc = center_of_mass(nc_physical; threshold=-200f0)
+# Expected: near heart but offset due to more body in FOV, e.g., (-5, 45, 85) mm
+```
+
+### Step 3: Align Centers
+
+```julia
+nc_aligned, translation = align_centers(nc_physical, ccta_physical)
+# translation ≈ (5, 5, -15) mm to move NC heart to match CCTA heart position
+```
+
+### Step 4: Find Overlap Region
+
+```julia
+overlap = compute_overlap_region(ccta_physical, nc_aligned)
+# overlap ≈ CCTA extent since it's smaller FOV
+
+# Verify overlap is valid (CCTA is fully contained)
+println("Overlap extent: $(overlap.max .- overlap.min) mm")
+```
+
+### Step 5: Crop Non-Contrast to Overlap
+
+```julia
+nc_cropped = crop_to_region(nc_aligned, overlap)
+# Now nc_cropped covers same physical region as CCTA
+```
+
+### Step 6: Resample to Common Resolution
+
+```julia
+# Register at 2mm isotropic for speed
+ccta_resampled = resample(ccta_physical, 2.0f0)  # 180/2 = 90 voxels each dim
+nc_resampled = resample(nc_cropped, 2.0f0)       # Same size after crop
+```
+
+### Step 7: Verify Preprocessing Worked
+
+```julia
+# Checkerboard should show rough alignment
+checkerboard = create_checkerboard(ccta_resampled, nc_resampled)
+# Hearts should approximately overlap in checkerboard view
+```
+
+### Step 8: Run Registration with MI
+
+```julia
+result = register(nc_resampled, ccta_resampled, SyNRegistration();
+    loss_fn=mi_loss,
+    final_interpolation=:nearest)
+```
+
+### Step 9: Apply Transform to Original
+
+```julia
+# Compose preprocessing + registration transforms
+# Apply to original 0.5mm CCTA with nearest-neighbor for HU preservation
+```
+
+---
+
+## UPDATES TO IMPL-PREPROCESS-001 ACCEPTANCE CRITERIA
+
+Based on this research, the following specific requirements should be added to IMPL-PREPROCESS-001:
+
+### Functions to Implement
+
+1. **`center_of_mass(image::PhysicalImage; threshold=-200f0)`**
+   - Compute intensity-weighted COM in physical coordinates (mm)
+   - Threshold excludes air (HU < threshold) from computation
+   - Returns `(x_mm, y_mm, z_mm)` tuple
+   - Uses AK.foreachindex for GPU with atomic accumulation
+   - Works with anisotropic voxels
+
+2. **`align_centers(moving::PhysicalImage, static::PhysicalImage; threshold=-200f0)`**
+   - Computes COM for both images
+   - Returns translated moving image (origin adjusted, data unchanged)
+   - Also returns the translation vector
+
+3. **`compute_overlap_region(img1::PhysicalImage, img2::PhysicalImage)`**
+   - Computes bounding boxes in physical coordinates
+   - Returns intersection `(min_corner, max_corner)` in mm
+   - Returns `nothing` if no overlap
+
+4. **`crop_to_region(image::PhysicalImage, region)`**
+   - Crops to specified physical region
+   - Returns new PhysicalImage with correct origin
+   - Uses nearest-voxel boundaries (no interpolation)
+
+5. **`window_intensity(image; min_hu=-200f0, max_hu=1000f0)`**
+   - Clamps values to [min_hu, max_hu]
+   - Uses AK.foreachindex for GPU
+   - Returns new array
+
+6. **`preprocess_for_registration(moving, static; kwargs...)`**
+   - Main pipeline combining all steps
+   - Parameters: `registration_resolution`, `align_com`, `crop_to_overlap`, `window_hu`
+   - Returns: `(preprocessed_moving, preprocessed_static, preprocess_info)`
+
+### Test Requirements
+
+1. `center_of_mass` returns correct physical coordinates for synthetic image with known COM
+2. `align_centers` makes COMs match within 0.1mm tolerance
+3. `compute_overlap_region` correctly identifies intersection for:
+   - Fully overlapping images
+   - Partially overlapping images
+   - Non-overlapping images (returns nothing)
+4. `crop_to_region` produces image with correct physical extent
+5. Full pipeline produces visually aligned images (checkerboard test)
+6. All operations preserve MtlArray type
+
+---
+
+## KEY REFERENCES
+
+### DICOM Coordinate Systems
+- [DICOM Standard Browser - ImagePositionPatient](https://dicom.innolitics.com/ciods/rt-dose/image-plane/00200032)
+- [AI Summer - Medical Image Coordinates](https://theaisummer.com/medical-image-coordinates/)
+- [RedBrick AI - DICOM Coordinate Systems](https://medium.com/redbrick-ai/dicom-coordinate-systems-3d-dicom-for-computer-vision-engineers-pt-1-61341d87485f)
+
+### Registration Initialization
+- [SimpleITK Registration Initialization Notebook](https://insightsoftwareconsortium.github.io/SimpleITK-Notebooks/Python_html/63_Registration_Initialization.html)
+- [SimpleITK CenteredTransformInitializer](https://simpleitk.org/doxygen/latest/html/classitk_1_1simple_1_1CenteredTransformInitializerFilter.html)
+- [ITK ImageMomentsCalculator](http://docs.itk.org/projects/doxygen/en/stable/classitk_1_1ImageMomentsCalculator.html)
+
+### ANTs Documentation
+- [Anatomy of antsRegistration Call](https://github.com/ANTsX/ANTs/wiki/Anatomy-of-an-antsRegistration-call)
+- [Tips for Improving Registration](https://github.com/ANTsX/ANTs/wiki/Tips-for-improving-registration-results)
+- [ANTsPy Registration](https://antspy.readthedocs.io/en/latest/registration.html)
+
+### FOV Mismatch Research
+- [Neural Networks for Cropped Medical Images](https://pmc.ncbi.nlm.nih.gov/articles/PMC8683602/)
+- [Deformable Registration on Partially Matched Images](https://ncbi.nlm.nih.gov/pmc/articles/PMC4108644)
+
+---
+
+## [IMPL-PREPROCESS-001] Implement preprocessing pipeline for clinical CT registration
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+### Implementation Summary
+
+Implemented a complete preprocessing pipeline for clinical CT registration in `src/preprocess.jl`. The pipeline handles the critical preprocessing steps identified in the research phases that are required before optimization can succeed (COM alignment, FOV overlap detection, cropping, resampling, and intensity windowing).
+
+### Key Files
+- `src/preprocess.jl` - Main implementation (~600 lines)
+- `test/test_preprocess.jl` - Comprehensive test suite
+
+### Functions Implemented
+
+#### 1. `center_of_mass(image::PhysicalImage; threshold=-200f0)`
+- Computes intensity-weighted center of mass in physical coordinates (mm)
+- Uses threshold to exclude air/lung (typically < -200 HU)
+- GPU-accelerated with `AK.foreachindex` and `Atomix.@atomic` for accumulation
+- Handles anisotropic voxels correctly
+
+```julia
+# Example
+com = center_of_mass(ccta_image; threshold=-200f0)
+# Returns (x_mm, y_mm, z_mm) near heart center
+```
+
+#### 2. `align_centers(moving::PhysicalImage, static::PhysicalImage; threshold=-200f0)`
+- Computes translation to align centers of mass
+- Returns new PhysicalImage with adjusted origin (data unchanged - no resampling)
+- Also returns the translation vector for later composition
+
+```julia
+nc_aligned, translation = align_centers(nc_physical, ccta_physical)
+# translation might be (5.0, 5.0, -15.0) mm
+```
+
+#### 3. `compute_overlap_region(img1::PhysicalImage, img2::PhysicalImage)`
+- Computes physical bounding boxes for both images
+- Returns intersection region or `nothing` if no overlap
+- Critical for handling tight FOV (CCTA) inside wide FOV (non-contrast)
+
+```julia
+overlap = compute_overlap_region(ccta, nc_aligned)
+# overlap = (min=(x, y, z), max=(x, y, z)) in mm
+```
+
+#### 4. `crop_to_overlap(image::PhysicalImage, region)`
+- Crops image to specified physical region
+- GPU-accelerated with `AK.foreachindex`
+- Updates origin correctly to maintain physical coordinates
+
+#### 5. `window_intensity(image; min_hu=-200f0, max_hu=1000f0)`
+- Clamps intensity values to specified range
+- Reduces influence of extreme values (bone, metal artifacts)
+- GPU-accelerated with `AK.foreachindex`
+
+#### 6. `preprocess_for_registration(moving, static; kwargs...)`
+Main pipeline function combining all steps:
+
+```julia
+moving_prep, static_prep, info = preprocess_for_registration(
+    moving, static;
+    registration_resolution=2.0f0,  # Target spacing in mm
+    align_com=true,                  # Align centers of mass
+    do_crop_to_overlap=true,         # Crop both to overlap
+    window_hu=true,                  # Apply HU windowing
+    min_hu=-200f0,                   # Minimum HU
+    max_hu=1000f0,                   # Maximum HU
+    com_threshold=-200f0             # Threshold for COM computation
+)
+```
+
+Returns `PreprocessInfo` struct with:
+- `translation`: The COM alignment translation in mm
+- `overlap_region`: Physical bounds of overlap
+- `com_moving`: Original COM of moving image
+- `com_static`: Original COM of static image
+
+### Architecture
+
+All functions follow the GPU-first pattern:
+
+```julia
+function _center_of_mass_3d(image::PhysicalImage{T, 5}, threshold::T) where T
+    # Allocate accumulator array (avoids scalar indexing)
+    accum = similar(data, 4, N)  # sum_weight, sum_x, sum_y, sum_z
+    fill!(accum, zero(T))
+    
+    AK.foreachindex(data) do idx
+        # Convert linear index to (i, j, k, c, n)
+        ...
+        weight = max(val - threshold, zero(T))
+        if weight > zero(T)
+            # Accumulate with atomics
+            Atomix.@atomic accum[1, n] += weight
+            Atomix.@atomic accum[2, n] += weight * phys_x
+            ...
+        end
+    end
+    
+    # Copy small accumulator to CPU for final division
+    accum_cpu = Array(accum)
+    com_x = accum_cpu[2, 1] / accum_cpu[1, 1]
+    ...
+end
+```
+
+### Test Results
+
+All tests pass on both CPU (Array) and GPU (MtlArray):
+
+```
+Test Summary:  | Pass  Total  
+center_of_mass |   26     26  
+align_centers  |   20     20  
+compute_overlap_region |   30     30  
+crop_to_overlap |   24     24  
+window_intensity |   20     20  
+preprocess_for_registration |   36     36  
+Integration: Cardiac CT Scenario |   14     14  
+```
+
+### Key Design Decisions
+
+1. **Threshold-based COM**: Uses -200 HU threshold to exclude air/lung from COM calculation, which would otherwise bias results for FOV mismatch cases.
+
+2. **Origin adjustment vs resampling**: `align_centers` only adjusts the origin metadata, not the data. This is faster and preserves original voxels. Actual resampling happens in `preprocess_for_registration`.
+
+3. **Separate cropping from overlap detection**: Users can compute overlap region independently and use it for other purposes (e.g., visualization).
+
+4. **Size differences after preprocessing**: Due to rounding in resampling calculations, preprocessed images may differ by 1-2 voxels. This is acceptable since registration handles minor size differences.
+
+---

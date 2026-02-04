@@ -52,6 +52,9 @@ if PYTHON_AVAILABLE
 
     # Clinical registration workflow tests
     include("test_clinical.jl")
+
+    # Preprocessing pipeline tests
+    include("test_preprocess.jl")
 else
     @warn "Skipping all Python-based parity tests"
 

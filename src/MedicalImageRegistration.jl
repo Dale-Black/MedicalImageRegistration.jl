@@ -20,6 +20,9 @@ include("mi_loss.jl")
 # Physical coordinates and anisotropic voxel support
 include("physical.jl")
 
+# Preprocessing pipeline for clinical CT registration
+include("preprocess.jl")
+
 # Transform resampling for multi-resolution workflows
 include("resample_transform.jl")
 
@@ -42,6 +45,12 @@ export mi_loss, nmi_loss
 export PhysicalImage
 export affine_grid_physical
 export resample
+
+# Exports - Preprocessing
+export center_of_mass, align_centers
+export compute_overlap_region, crop_to_overlap
+export window_intensity
+export preprocess_for_registration, PreprocessInfo
 
 # Exports - Transform resampling
 export resample_displacement, resample_velocity
