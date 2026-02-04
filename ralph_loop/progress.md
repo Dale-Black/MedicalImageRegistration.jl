@@ -5677,3 +5677,429 @@ All 26 stories in prd.json are now marked as DONE. The MedicalImageRegistration.
 5. **Complete Documentation** - README, examples, tests
 
 RALPH_ALL_COMPLETE
+
+---
+
+## REGISTRATION FAILURE ANALYSIS
+
+**Date:** 2026-02-04
+
+### The Problem
+
+The cardiac_ct.jl notebook registration **FAILS**. Visual inspection shows:
+- "CCTA Before Registration" and "CCTA After Registration" are nearly identical
+- Checkerboard overlay shows severe discontinuities at edges
+- Difference image shows massive bright areas (large residual error)
+
+**Screenshot evidence:** The before/after images are visually indistinguishable. The registration did essentially nothing.
+
+### Why It Failed
+
+We implemented MI loss, physical coordinates, and HU preservation - but we're **missing preprocessing**. We threw raw images at the optimizer without:
+
+1. **No initial alignment** - Images may be in completely different positions
+2. **No center-of-mass alignment** - FOVs don't overlap properly
+3. **No resampling to common space** - 3mm vs 0.5mm z-spacing
+4. **No FOV handling** - Tight CCTA FOV is subset of wide non-contrast FOV
+5. **Optimizer can't fix gross misalignment** - Gradient descent needs a reasonable starting point
+
+### What ANTs Does Differently
+
+ANTs registration works because it does **extensive preprocessing**:
+
+1. **Center of mass alignment** - Translate so image centers match
+2. **Resampling to common grid** - Both images same resolution
+3. **Intensity normalization** - Histogram matching or windowing
+4. **Multi-resolution pyramid** - Coarse to fine optimization
+5. **Robust initialization** - Multiple starting points if needed
+
+We skipped all of this and expected the optimizer to figure it out from scratch.
+
+### New Stories Added
+
+| Story ID | Title | Priority |
+|----------|-------|----------|
+| **RESEARCH-ANTS-PREPROCESS-001** | Research ANTs preprocessing pipeline | 27 |
+| **RESEARCH-INITIAL-ALIGNMENT-001** | Research initial alignment strategies | 28 |
+| **IMPL-PREPROCESS-001** | Implement preprocessing pipeline | 29 |
+| **IMPL-REGISTER-PIPELINE-001** | Implement complete registration with preprocessing | 30 |
+| **FIX-NOTEBOOK-001** | Fix cardiac_ct.jl notebook | 31 |
+| **RESEARCH-HYBRID-ANTS-001** | Research hybrid ANTs + GPU approach | 32 |
+
+### Key Insight
+
+**The registration algorithm itself is fine.** The problem is the input. ANTs spends significant effort getting images into a state where optimization can succeed. We need the same preprocessing pipeline.
+
+---
+
+### [RESEARCH-ANTS-PREPROCESS-001] Research ANTs preprocessing pipeline for CT registration
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+## Executive Summary
+
+The cardiac_ct.jl notebook registration FAILS because we throw raw images at the optimizer without preprocessing. The before/after images are nearly identical because gradient descent cannot escape the local minimum when starting from a grossly misaligned state.
+
+**Root Causes:**
+1. No initial alignment (images may be in completely different physical positions)
+2. No center-of-mass alignment (FOVs don't overlap properly)
+3. Massive resolution mismatch (3mm vs 0.5mm z-spacing = 6x difference)
+4. FOV mismatch (tight CCTA is subset of wide non-contrast FOV)
+5. Gradient descent needs a reasonable starting point - cannot fix gross misalignment
+
+---
+
+## WHY THE CURRENT REGISTRATION FAILS
+
+### The Optimization Landscape Problem
+
+Registration uses gradient descent to minimize a loss function. The loss landscape has:
+- **Global minimum**: Perfect alignment
+- **Local minima**: Suboptimal alignments that "trap" the optimizer
+- **Large-scale basins**: Responsible for large misregistrations, often far from global minimum
+
+**Key insight from literature:**
+> "Neighboring structures with similar appearance could cause a wrong match, especially in case of a large initial misalignment."
+
+When images start far apart in physical space:
+1. The gradient points toward a local minimum, not the global one
+2. Multi-resolution helps but cannot overcome gross misalignment
+3. The optimizer "gives up" and returns essentially the identity transform
+
+### Our Specific Failure Modes
+
+| Issue | Our Current Approach | Why It Fails |
+|-------|---------------------|--------------|
+| **Different FOVs** | Ignore it | CCTA heart is at different voxel indices than NC heart |
+| **No initial alignment** | Start from identity | Heart might be 50+ voxels away from correct position |
+| **6x resolution mismatch** | Resample to 2mm | Good, but heart positions still don't match |
+| **Contrast intensity mismatch** | Use MI loss | Good, but MI still needs overlap to measure |
+| **Physical coordinates** | Create PhysicalImage | Good, but don't use coordinates for alignment |
+
+### The Fundamental Problem
+
+```
+Without preprocessing:
+
+Non-Contrast (3mm, large FOV):        CCTA (0.5mm, tight FOV):
+┌─────────────────────────────┐       ┌───────────────┐
+│                             │       │               │
+│     [lung]   [heart]        │       │    [heart]    │ <- Heart fills most of image
+│                             │       │               │
+│        [spine]              │       │               │
+└─────────────────────────────┘       └───────────────┘
+
+The heart is at DIFFERENT voxel positions!
+Gradient descent sees no overlap → "stuck" near identity transform
+```
+
+---
+
+## ANTs PREPROCESSING PIPELINE IN ORDER
+
+Based on research of ANTs documentation and best practices:
+
+### Step 1: Initial Transform Selection
+
+ANTs provides three initialization strategies:
+- **Option 0 (GEOMETRY)**: Match by mid-point (center voxel alignment)
+- **Option 1 (MOMENTS)**: Match by center of mass (intensity-weighted)
+- **Option 2 (ORIGIN)**: Match by physical origin (0,0,0 from headers)
+
+**Recommendation:** Center of mass alignment "usually works well" for most cases.
+
+For difficult cases, use `antsAI`:
+> "antsAI runs many quick registrations with different initial transforms (rotations and/or translations), to find what works best."
+
+### Step 2: Bias Field Correction (Optional for CT)
+
+For MRI: Run N4BiasFieldCorrection before registration.
+For CT: Usually not needed (CT has uniform intensity).
+
+### Step 3: Intensity Preprocessing
+
+**For same-modality (CT to CT):**
+- Histogram matching can help
+- Intensity windowing to focus on relevant range
+
+**For multi-modal (contrast vs non-contrast):**
+- Do NOT use histogram matching
+- MI loss handles intensity differences
+- Consider windowing to exclude extreme values (air, metal)
+
+### Step 4: Masking for FOV Mismatch
+
+> "Use a mask when there are features in one image that have no proper match to the other image. For example, images with different fields of view."
+
+**For our cardiac CT case:**
+- Create mask of overlapping anatomical region
+- Use mask during registration to focus on cardiac area
+- Exclude lung in larger FOV (no corresponding region in tight FOV)
+
+### Step 5: Multi-Resolution Pyramid
+
+ANTs uses `shrinkFactors` and `smoothingSigmas`:
+
+| Level | Shrink Factor | Smoothing Sigma | Purpose |
+|-------|---------------|-----------------|---------|
+| 1 | 8 | 3 voxels | Coarse alignment, ignore fine details |
+| 2 | 4 | 2 voxels | Medium alignment |
+| 3 | 2 | 1 voxel | Fine alignment |
+| 4 | 1 | 0 voxels | Final refinement |
+
+**Key insight:**
+> "Reduce largest shrink factors when registration struggles. Larger shrink factors demand good initialization and consistent resolution/FOV."
+
+### Step 6: Progressive Registration
+
+1. **Rigid first**: Translation + rotation only (6 DOF)
+2. **Affine second**: Add scaling + shear (12 DOF)
+3. **Deformable last**: Local warping (SyN)
+
+> "A good rigid and affine alignment will make deformable registration faster and more robust."
+
+---
+
+## CENTER-OF-MASS (COM) ALIGNMENT
+
+### The Algorithm
+
+1. **Threshold the image** to exclude background (e.g., < -500 HU for CT to exclude air)
+2. **Compute intensity-weighted centroid**:
+   ```
+   COM_x = Σ(x * I(x,y,z)) / Σ(I(x,y,z))
+   COM_y = Σ(y * I(x,y,z)) / Σ(I(x,y,z))
+   COM_z = Σ(z * I(x,y,z)) / Σ(I(x,y,z))
+   ```
+3. **Convert to physical coordinates** using image spacing and origin
+4. **Compute translation** to align COMs:
+   ```
+   translation = COM_static - COM_moving
+   ```
+5. **Apply translation** to moving image
+
+### Implementation Considerations
+
+**Threshold selection for CT:**
+- Air: -1000 HU → exclude
+- Soft tissue: 0-100 HU → include
+- Bone: 400+ HU → include (but high weight)
+- Consider using threshold around -200 to -500 HU
+
+**Handling contrast:**
+- Contrast-enhanced blood has ~300 HU vs ~40 HU non-contrast
+- COM might shift slightly due to contrast
+- But translation alignment is usually robust to this
+
+### SimpleITK CenteredTransformInitializer
+
+SimpleITK provides two modes:
+- **GEOMETRY**: Uses physical centers of the images
+- **MOMENTS**: Uses intensity-weighted centers of mass
+
+> "The MOMENTS mode assumes that the moments of the anatomical objects are similar for both images and hence the best initial guess for registration is to superimpose both mass centers."
+
+---
+
+## ANTs RESAMPLING STRATEGY
+
+### When to Resample
+
+1. **Before registration**: Resample both images to common resolution for optimization
+2. **After registration**: Apply transform to original resolution with appropriate interpolation
+
+### Interpolation Types
+
+| Type | Code | Use Case |
+|------|------|----------|
+| Linear | 0 | General purpose, smooth output |
+| Nearest Neighbor | 1 | Label maps, HU preservation |
+| Gaussian | 2 | Smoothed output |
+| Windowed Sinc | 3 | High-quality resampling |
+| B-Spline | 4 | Smooth, high quality |
+
+### Resampling for Different FOVs
+
+When images have different FOVs:
+1. Identify overlapping physical region
+2. Crop larger FOV to match smaller FOV (or pad smaller to match larger)
+3. Resample to common voxel spacing
+
+---
+
+## ANTs MULTI-RESOLUTION PYRAMID STRATEGY
+
+### The Principle
+
+> "The idea is to start with 'blurry' images (low resolution, highly smoothed), register those to each other, then go to the next step, with a sharper higher resolution version, and so on."
+
+### Pyramid Parameters
+
+```
+-c [1000x500x250x100,1e-6,10]   # Convergence: iterations per level, threshold, window
+-f 8x4x2x1                       # Shrink factors
+-s 3x2x1x0vox                    # Smoothing sigmas
+```
+
+**These must align:** All three parameters must have the same number of levels.
+
+### Why Multi-Resolution Helps
+
+1. **Coarse levels**: Large, smooth structures guide initial alignment
+2. **Fine levels**: Small details refine the alignment
+3. **Convergence per level**: Stop when improvement is below threshold
+
+### Limitations
+
+> "Multi-resolution helps but cannot overcome gross misalignment"
+
+If images start 100mm apart, even 8x downsampling won't bring them close enough. **Initial alignment is still required.**
+
+---
+
+## PREPROCESSING CHECKLIST FOR CARDIAC CT REGISTRATION
+
+### Required Steps (MUST DO)
+
+1. **[ ] Verify physical space alignment from DICOM headers**
+   - Check ImagePositionPatient for both series
+   - If origins differ by more than 50mm, images may not overlap
+
+2. **[ ] Compute and align centers of mass**
+   - Threshold at -200 HU to exclude air
+   - Compute intensity-weighted COM for both images
+   - Apply translation to align COMs
+
+3. **[ ] Handle FOV mismatch**
+   - Identify which image has larger FOV
+   - Compute overlapping physical region
+   - Crop or mask to focus on overlapping anatomy
+
+4. **[ ] Resample to common registration resolution**
+   - Typically 2mm isotropic for cardiac CT
+   - Use linear interpolation (ok for optimization)
+   - This is a WORKING COPY only
+
+5. **[ ] Verify images now overlap**
+   - After preprocessing, heart should be roughly aligned
+   - Create checkerboard of preprocessed images
+   - If still grossly misaligned, preprocessing failed
+
+### Optional Steps (NICE TO HAVE)
+
+6. **[ ] Intensity windowing**
+   - Clip to relevant HU range (e.g., -200 to 1000)
+   - Reduces influence of outliers
+
+7. **[ ] Create registration mask**
+   - Focus on cardiac region
+   - Exclude lung and other non-matching areas
+
+8. **[ ] Multi-start initialization (if COM fails)**
+   - Try multiple initial rotations/translations
+   - Pick best starting point based on initial MI
+
+### After Registration
+
+9. **[ ] Upsample transform to original resolution**
+   - Scale displacement field appropriately
+   - For affine: just change target size
+
+10. **[ ] Apply to original image with nearest-neighbor**
+    - Preserves HU values
+    - Critical for quantitative analysis
+
+---
+
+## GAP ANALYSIS: Current Library vs What's Needed
+
+| Capability | Current Status | What's Needed | Priority |
+|------------|----------------|---------------|----------|
+| **Center of mass computation** | ❌ Missing | `center_of_mass(image; threshold=-200)` | HIGH |
+| **COM-based initial alignment** | ❌ Missing | `align_centers(moving, static)` | HIGH |
+| **FOV overlap detection** | ❌ Missing | `compute_overlap_region(img1, img2)` | HIGH |
+| **Crop to overlap** | ❌ Missing | `crop_to_region(image, region)` | HIGH |
+| **Resample to spacing** | ✅ Partial (resample exists) | Already have `resample()` | DONE |
+| **Intensity windowing** | ❌ Missing | `window_intensity(img; min_hu, max_hu)` | MEDIUM |
+| **Registration mask support** | ❌ Missing | `register_clinical(...; mask=...)` | MEDIUM |
+| **Preprocessing pipeline** | ❌ Missing | `preprocess_for_registration(moving, static)` | HIGH |
+| **Multi-resolution pyramid** | ✅ Have it | `affine_scales`, `affine_iterations` | DONE |
+| **MI loss** | ✅ Have it | `mi_loss` | DONE |
+| **HU preservation** | ✅ Have it | `preserve_hu=true` | DONE |
+| **Physical coordinates** | ✅ Have it | `PhysicalImage` | DONE |
+
+### Critical Missing Pieces
+
+1. **Initial alignment** - Without COM alignment, optimizer can't start properly
+2. **FOV handling** - Without overlap detection, images may not match at all
+3. **Preprocessing pipeline** - Need one-function solution that does all steps
+
+---
+
+## PROPOSED IMPLEMENTATION ORDER
+
+Based on research, here's the recommended implementation order:
+
+1. **IMPL-PREPROCESS-001**: Core preprocessing functions
+   - `center_of_mass()` - compute intensity-weighted COM
+   - `align_centers()` - translate moving to align COM with static
+   - `compute_overlap_region()` - find physical overlap
+   - `crop_to_overlap()` - crop larger image to overlap
+   - `window_intensity()` - clip HU range
+   - `preprocess_for_registration()` - full pipeline
+
+2. **IMPL-REGISTER-PIPELINE-001**: Integrated registration with preprocessing
+   - Update `register_clinical()` to call preprocessing by default
+   - Add `preprocess=true` kwarg
+   - Add `center_of_mass_init=true` kwarg
+   - Compose preprocessing transform with registration transform
+
+3. **FIX-NOTEBOOK-001**: Update cardiac_ct.jl
+   - Show preprocessing steps
+   - Verify preprocessing makes images overlap
+   - Demonstrate working registration
+
+---
+
+## KEY REFERENCES
+
+### ANTs Documentation
+- [Anatomy of an antsRegistration call](https://github.com/ANTsX/ANTs/wiki/Anatomy-of-an-antsRegistration-call)
+- [Tips for improving registration results](https://github.com/ANTsX/ANTs/wiki/Tips-for-improving-registration-results)
+- [ANTsPy Registration](https://antspy.readthedocs.io/en/latest/registration.html)
+
+### SimpleITK
+- [Registration Initialization](https://insightsoftwareconsortium.github.io/SimpleITK-Notebooks/Python_html/63_Registration_Initialization.html)
+
+### Cardiac CT Registration
+- [Overview of Image Registration for Cardiac Diagnosis](https://pmc.ncbi.nlm.nih.gov/articles/PMC6109558/)
+
+---
+
+## UPDATES TO IMPL-PREPROCESS-001 ACCEPTANCE CRITERIA
+
+Based on this research, the IMPL-PREPROCESS-001 story acceptance criteria should be updated to include:
+
+**New functions to implement:**
+1. `center_of_mass(image::PhysicalImage; threshold=-200f0)` - returns (x, y, z) in mm
+2. `align_centers(moving::PhysicalImage, static::PhysicalImage)` - returns translated moving image
+3. `compute_overlap_region(img1::PhysicalImage, img2::PhysicalImage)` - returns overlapping box in mm
+4. `crop_to_overlap(image::PhysicalImage, region)` - crops to specified physical region
+5. `window_intensity(image; min_hu=-200, max_hu=1000)` - clips intensity values
+6. `preprocess_for_registration(moving, static; kwargs...)` - full pipeline
+
+**Pipeline behavior:**
+1. Compute COMs and align centers
+2. Detect overlapping FOV
+3. Crop to overlap (optional)
+4. Resample to common spacing
+5. Apply intensity windowing (optional)
+6. Return preprocessed pair + preprocessing transform
+
+**Testing requirements:**
+1. After preprocessing, images should visually overlap (checkerboard test)
+2. COM alignment should work for anisotropic images
+3. All operations should work on GPU (MtlArray)
+
+---
