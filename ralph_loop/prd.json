@@ -1,0 +1,425 @@
+{
+  "project": "MedicalImageRegistration.jl",
+  "description": "Port torchreg to Julia with GPU-first architecture using AK.jl + Mooncake rrule!!",
+  "source": "https://github.com/codingfisch/torchreg",
+  "philosophy": {
+    "gpu_first": "ALL code runs on GPU via AcceleratedKernels.jl. NO CPU fallbacks. NO nested for loops.",
+    "ad_strategy": "Use Mooncake.jl with custom rrule!! for GPU-accelerated backward passes",
+    "testing": "Test with Metal.jl MtlArrays locally. All tests must pass on GPU.",
+    "no_compromises": "If something doesn't work on GPU with AD, fix it properly. No hacks."
+  },
+  "loopInstructions": {
+    "storyTypes": {
+      "NUKE": "Delete old broken code and start fresh",
+      "RESEARCH": "Study and document approach before implementing",
+      "IMPL": "Implement with AK.jl + Mooncake rrule!! from the start",
+      "TEST": "Test on Metal GPU with MtlArrays"
+    },
+    "rules": [
+      "EVERY function must work on GPU arrays (MtlArray, CuArray)",
+      "EVERY differentiable function needs a Mooncake rrule!!",
+      "NO nested for loops - use AK.foreachindex everywhere",
+      "NO CPU fallbacks - if it doesn't work on GPU, fix it",
+      "Test with MtlArrays locally before marking done"
+    ]
+  },
+  "stories": [
+    {
+      "id": "NUKE-001",
+      "type": "NUKE",
+      "title": "Delete all existing src/ code and start fresh",
+      "status": "done",
+      "priority": 1,
+      "blockedBy": [],
+      "description": "The current implementation is broken - has CPU fallbacks, nested for loops, and AD hacks. Delete ALL files in src/ except MedicalImageRegistration.jl (keep as empty module). We're starting from scratch with GPU-first architecture.",
+      "acceptanceCriteria": [
+        "All .jl files in src/ deleted except MedicalImageRegistration.jl",
+        "MedicalImageRegistration.jl contains only: module declaration, empty exports",
+        "No old broken code remains",
+        "Git commit with message: [NUKE-001] Clean slate for GPU-first rewrite"
+      ],
+      "files": ["src/"]
+    },
+    {
+      "id": "RESEARCH-MOONCAKE-001",
+      "type": "RESEARCH",
+      "title": "Document Mooncake rrule!! pattern for GPU functions",
+      "status": "done",
+      "priority": 2,
+      "blockedBy": ["NUKE-001"],
+      "description": "Before implementing, understand exactly how to write Mooncake rrule!! for GPU-accelerated functions. Document the pattern with a simple example. Test that the pattern works with MtlArrays.",
+      "acceptanceCriteria": [
+        "progress.md documents Mooncake rrule!! signature",
+        "progress.md shows CoDual, NoFData, NoRData usage",
+        "progress.md has working example with AK.foreachindex in both forward and backward",
+        "Example tested with MtlArrays and gradients verified"
+      ],
+      "files": []
+    },
+    {
+      "id": "IMPL-GRID-001",
+      "type": "IMPL",
+      "title": "Implement grid_sample with AK.jl + Mooncake rrule!!",
+      "status": "done",
+      "priority": 3,
+      "blockedBy": ["RESEARCH-MOONCAKE-001"],
+      "description": "Implement grid_sample from scratch. Forward pass uses AK.foreachindex. Backward pass uses AK.foreachindex. Both registered with Mooncake rrule!!. Must match PyTorch F.grid_sample output.",
+      "acceptanceCriteria": [
+        "src/grid_sample.jl with grid_sample function using AK.foreachindex",
+        "Mooncake rrule!! defined for grid_sample",
+        "Backward pass also uses AK.foreachindex",
+        "2D (bilinear) and 3D (trilinear) interpolation",
+        "padding_mode :zeros and :border",
+        "Matches PyTorch F.grid_sample within rtol=1e-5",
+        "Works on MtlArrays - test locally",
+        "Gradients verified against finite differences on GPU"
+      ],
+      "files": ["src/grid_sample.jl", "test/test_grid_sample.jl"]
+    },
+    {
+      "id": "IMPL-AFFINE-GRID-001",
+      "type": "IMPL",
+      "title": "Implement affine_grid with AK.jl + Mooncake rrule!!",
+      "status": "done",
+      "priority": 4,
+      "blockedBy": ["IMPL-GRID-001"],
+      "description": "Implement affine_grid that creates sampling grid from affine matrix. Uses AK.foreachindex. Has Mooncake rrule!! for backward pass.",
+      "acceptanceCriteria": [
+        "src/affine_grid.jl with affine_grid function using AK.foreachindex",
+        "Mooncake rrule!! defined",
+        "2D and 3D support",
+        "Matches PyTorch F.affine_grid within rtol=1e-5",
+        "Works on MtlArrays"
+      ],
+      "files": ["src/affine_grid.jl"]
+    },
+    {
+      "id": "IMPL-COMPOSE-001",
+      "type": "IMPL",
+      "title": "Implement compose_affine with AK.jl + Mooncake rrule!!",
+      "status": "done",
+      "priority": 5,
+      "blockedBy": ["IMPL-AFFINE-GRID-001"],
+      "description": "Implement compose_affine that builds affine matrix from translation, rotation, zoom, shear. GPU-accelerated with Mooncake rrule!!.",
+      "acceptanceCriteria": [
+        "src/compose_affine.jl using AK.jl operations",
+        "Mooncake rrule!! defined",
+        "Matches torchreg compose_affine",
+        "Works on MtlArrays"
+      ],
+      "files": ["src/compose_affine.jl"]
+    },
+    {
+      "id": "IMPL-METRICS-001",
+      "type": "IMPL",
+      "title": "Implement loss functions with AK.jl + Mooncake rrule!!",
+      "status": "done",
+      "priority": 6,
+      "blockedBy": ["IMPL-COMPOSE-001"],
+      "description": "Implement MSE, Dice, NCC losses. All GPU-accelerated with AK.jl. All have Mooncake rrule!!.",
+      "acceptanceCriteria": [
+        "src/metrics.jl with mse_loss, dice_loss, dice_score, NCC",
+        "All use AK.jl for GPU acceleration",
+        "All have Mooncake rrule!!",
+        "Match torchreg metrics",
+        "Work on MtlArrays"
+      ],
+      "files": ["src/metrics.jl"]
+    },
+    {
+      "id": "IMPL-AFFINE-REG-001",
+      "type": "IMPL",
+      "title": "Implement AffineRegistration with GPU optimization loop",
+      "status": "done",
+      "priority": 7,
+      "blockedBy": ["IMPL-METRICS-001"],
+      "description": "Implement full AffineRegistration. Optimization loop runs entirely on GPU. Uses Mooncake for gradients. Uses Optimisers.jl for updates.",
+      "acceptanceCriteria": [
+        "src/affine.jl with AffineRegistration struct",
+        "fit! function runs entirely on GPU",
+        "Mooncake computes gradients through entire forward pass",
+        "Multi-resolution pyramid support",
+        "register() and transform() API",
+        "Converges on test cases with MtlArrays"
+      ],
+      "files": ["src/affine.jl", "src/types.jl"]
+    },
+    {
+      "id": "IMPL-SYN-001",
+      "type": "IMPL",
+      "title": "Implement SyN diffeomorphic registration on GPU",
+      "status": "done",
+      "priority": 8,
+      "blockedBy": ["IMPL-AFFINE-REG-001"],
+      "description": "Implement SyN registration. Scaling-and-squaring, flow composition, all on GPU with Mooncake AD.",
+      "acceptanceCriteria": [
+        "src/syn.jl with SyNRegistration struct",
+        "diffeomorphic_transform using AK.jl",
+        "Mooncake rrule!! for all custom ops",
+        "Converges on test cases with MtlArrays"
+      ],
+      "files": ["src/syn.jl"]
+    },
+    {
+      "id": "TEST-PARITY-001",
+      "type": "TEST",
+      "title": "Full parity tests against torchreg on GPU",
+      "status": "done",
+      "priority": 9,
+      "blockedBy": ["IMPL-SYN-001"],
+      "description": "Comprehensive parity tests comparing Julia GPU implementation against torchreg. All tests run on MtlArrays.",
+      "acceptanceCriteria": [
+        "grid_sample matches PyTorch within rtol=1e-5",
+        "affine_grid matches PyTorch within rtol=1e-5",
+        "compose_affine matches torchreg",
+        "All metrics match torchreg",
+        "AffineRegistration converges similarly to torchreg",
+        "All tests use MtlArrays"
+      ],
+      "files": ["test/"]
+    },
+    {
+      "id": "SETUP-CI-001",
+      "type": "IMPL",
+      "title": "GitHub Actions CI with Metal GPU testing",
+      "status": "done",
+      "priority": 10,
+      "blockedBy": ["TEST-PARITY-001"],
+      "description": "Set up CI that tests on macOS with Metal GPU.",
+      "acceptanceCriteria": [
+        ".github/workflows/ci.yml with macOS runner",
+        "Tests run with Metal.jl",
+        "CI passes"
+      ],
+      "files": [".github/workflows/ci.yml"]
+    },
+    {
+      "id": "DEMO-001",
+      "type": "IMPL",
+      "title": "Demo with TestImages.jl on GPU",
+      "status": "done",
+      "priority": 11,
+      "blockedBy": ["SETUP-CI-001"],
+      "description": "Create demo that runs registration on GPU with TestImages.jl.",
+      "acceptanceCriteria": [
+        "examples/demo.jl runs on GPU",
+        "Produces GIF showing registration",
+        "README updated"
+      ],
+      "files": ["examples/demo.jl", "README.md"]
+    },
+    {
+      "id": "DOC-001",
+      "type": "IMPL",
+      "title": "Document HU conservation and GPU requirements",
+      "status": "done",
+      "priority": 12,
+      "blockedBy": ["DEMO-001"],
+      "description": "Document intensity conservation for CT and GPU requirements.",
+      "acceptanceCriteria": [
+        "README documents HU conservation implications",
+        "README documents GPU requirements (Metal/CUDA)",
+        "Clear API documentation"
+      ],
+      "files": ["README.md"]
+    },
+    {
+      "id": "IMPL-NEAREST-001",
+      "type": "IMPL",
+      "title": "Add nearest-neighbor interpolation to grid_sample",
+      "status": "done",
+      "priority": 13,
+      "blockedBy": ["DOC-001"],
+      "description": "Add interpolation_mode kwarg to grid_sample supporting :bilinear/:trilinear (default) and :nearest. Nearest-neighbor preserves original intensity values (critical for HU conservation in CT). Forward pass rounds coordinates to nearest integer instead of bilinear weighting. Backward pass for :nearest returns zero gradients (not differentiable, but that's fine for final output). Must work on GPU with AK.foreachindex.",
+      "acceptanceCriteria": [
+        "grid_sample accepts interpolation kwarg (:bilinear/:trilinear default, :nearest option)",
+        "2D nearest-neighbor: rounds to nearest pixel, returns exact input value",
+        "3D nearest-neighbor: rounds to nearest voxel, returns exact input value",
+        "Backward pass for :nearest returns zero gradients (non-differentiable)",
+        "All padding_mode options work with :nearest",
+        "Works on MtlArrays",
+        "Matches PyTorch F.grid_sample mode='nearest' within exact equality",
+        "Test verifies output values are subset of input values (HU preservation)"
+      ],
+      "files": ["src/grid_sample.jl", "test/test_grid_sample.jl"]
+    },
+    {
+      "id": "IMPL-HYBRID-001",
+      "type": "IMPL",
+      "title": "Add hybrid interpolation mode to registration",
+      "status": "done",
+      "priority": 14,
+      "blockedBy": ["IMPL-NEAREST-001"],
+      "description": "Add final_interpolation kwarg to register(), transform(), and affine_transform() functions. During optimization, always use bilinear/trilinear for smooth gradients. For final output (and transform() calls), use the specified interpolation mode. Default is :bilinear/:trilinear (unchanged behavior). When final_interpolation=:nearest, the returned image preserves exact input intensity values. Also add to SyN: spatial_transform, apply_flows, etc.",
+      "acceptanceCriteria": [
+        "register() accepts final_interpolation kwarg (:bilinear default, :nearest option)",
+        "transform() accepts interpolation kwarg",
+        "affine_transform() accepts interpolation kwarg",
+        "AffineRegistration: optimization uses bilinear, final output uses final_interpolation",
+        "SyNRegistration: optimization uses trilinear, final output uses final_interpolation",
+        "spatial_transform() accepts interpolation kwarg",
+        "Default behavior unchanged (bilinear/trilinear throughout)",
+        "Works on MtlArrays for both modes",
+        "Documentation updated with HU preservation workflow"
+      ],
+      "files": ["src/affine.jl", "src/syn.jl", "src/types.jl"]
+    },
+    {
+      "id": "TEST-HU-001",
+      "type": "TEST",
+      "title": "Test HU preservation with hybrid interpolation",
+      "status": "done",
+      "priority": 15,
+      "blockedBy": ["IMPL-HYBRID-001"],
+      "description": "Comprehensive tests verifying that final_interpolation=:nearest preserves exact intensity values. Test with synthetic CT-like data with known HU values. Verify that output image values are always a subset of input image values. Test both AffineRegistration and SyNRegistration.",
+      "acceptanceCriteria": [
+        "Test: grid_sample :nearest output values ⊆ input values",
+        "Test: AffineRegistration with final_interpolation=:nearest preserves HU",
+        "Test: SyNRegistration with final_interpolation=:nearest preserves HU",
+        "Test: transform() with interpolation=:nearest preserves HU",
+        "Test: synthetic CT with HU=-1000 (air), 0 (water), 1000 (bone) - values unchanged",
+        "Test: registration still converges with hybrid mode (bilinear optimize, nearest output)",
+        "All tests on MtlArrays",
+        "Document example workflow in test comments"
+      ],
+      "files": ["test/test_hu_preservation.jl"]
+    },
+    {
+      "id": "DEMO-HU-001",
+      "type": "IMPL",
+      "title": "Shepp-Logan phantom demo comparing standard vs HU-preserving registration",
+      "status": "done",
+      "priority": 16,
+      "blockedBy": ["TEST-HU-001"],
+      "description": "Create a comprehensive demo using the Shepp-Logan phantom (3D via TestImages.shepp_logan(128) if available, otherwise 2D with TestImages.shepp_logan(256)) that visually demonstrates the difference between standard bilinear interpolation and HU-preserving nearest-neighbor hybrid mode. Generate side-by-side GIFs and quantitative analysis showing intensity value preservation.",
+      "acceptanceCriteria": [
+        "examples/demo_hu_preservation.jl created",
+        "Uses TestImages.shepp_logan() - prefer 3D shepp_logan(128) if available, fallback to 2D shepp_logan(256)",
+        "Creates synthetic misalignment (rotation + translation)",
+        "Runs registration with BOTH modes: standard (bilinear) and hybrid (final_interpolation=:nearest)",
+        "Generates GIF: registration_standard.gif showing bilinear interpolation result",
+        "Generates GIF: registration_hu_preserving.gif showing nearest-neighbor result",
+        "Generates comparison image showing intensity histogram before/after for both modes",
+        "Prints quantitative analysis: unique values before vs after, min/max values, value drift statistics",
+        "Demo shows that hybrid mode output values are EXACT subset of input values",
+        "Demo shows standard mode creates NEW interpolated values not in original",
+        "README.md updated with Shepp-Logan demo section and output images",
+        "README shows side-by-side comparison of the two approaches",
+        "Clear explanation of when to use each mode (visual alignment vs quantitative analysis)",
+        "Works on GPU (MtlArray) with CPU fallback"
+      ],
+      "files": ["examples/demo_hu_preservation.jl", "README.md", "examples/output/"]
+    },
+    {
+      "id": "RESEARCH-CLINICAL-001",
+      "type": "RESEARCH",
+      "title": "Research clinical CT registration challenges and solutions",
+      "status": "done",
+      "priority": 17,
+      "blockedBy": ["DEMO-HU-001"],
+      "description": "Research the challenges of registering real clinical CT scans with mismatched parameters. USE THIS CONCRETE SCENARIO THROUGHOUT: Scan 1 (static): 3mm slice thickness, large FOV (more lung visible), NON-CONTRAST cardiac CT. Scan 2 (moving): 0.5mm slice thickness, tight FOV (less lung), WITH CONTRAST cardiac CT. GOAL: Register these for QUANTITATIVE ANALYSIS where HU accuracy matters (e.g., calcium scoring, tissue density measurement, dose calculation). Document gaps and propose solutions. RESEARCH ONLY - no implementation.",
+      "acceptanceCriteria": [
+        "Document the CONCRETE USE CASE at the top: cardiac CT, 3mm non-contrast vs 0.5mm contrast, quantitative HU accuracy required",
+        "Document in progress.md: DICOM coordinate system (ImagePositionPatient, PixelSpacing, SliceThickness, ImageOrientationPatient)",
+        "Document: How to convert between voxel coordinates and physical (mm) coordinates",
+        "Document: The problem with contrast vs non-contrast registration - WHY does blood go from 40 HU to 300+ HU?",
+        "Document: Specific cardiac structures affected by contrast (chambers, coronary arteries, aorta)",
+        "Document: Mutual Information loss - what it is, why it handles multi-modal registration",
+        "Document: Anisotropic voxel handling (3mm z vs 0.5mm z) - 6x resolution difference!",
+        "Document: The inverse-resampling workflow for true HU preservation",
+        "Document: Mask-weighted registration for handling FOV mismatch (tight FOV misses lung)",
+        "Document: Quantitative accuracy requirements - what tolerance is acceptable for calcium scoring?",
+        "Create a gap analysis table: what current library has vs what's needed FOR THIS USE CASE",
+        "Propose implementation order for new features",
+        "Research existing Julia packages: DICOM.jl, NIfTI.jl for coordinate handling",
+        "NO CODE IMPLEMENTATION - research and documentation only"
+      ],
+      "files": ["ralph_loop/progress.md"]
+    },
+    {
+      "id": "RESEARCH-MI-001",
+      "type": "RESEARCH",
+      "title": "Research Mutual Information loss for multi-modal registration",
+      "status": "done",
+      "priority": 18,
+      "blockedBy": ["RESEARCH-CLINICAL-001"],
+      "description": "Deep dive into Mutual Information (MI) as a registration loss function. CONTEXT: For our cardiac CT use case (3mm non-contrast vs 0.5mm contrast), MSE/NCC fail because contrast agent changes intensities dramatically. MI measures statistical dependence - if heart blood is always 40 HU in non-contrast and 300 HU in contrast, MI learns this mapping. Research math, GPU challenges, and Mooncake integration.",
+      "acceptanceCriteria": [
+        "Reference the cardiac CT use case: why MSE fails when blood is 40 HU vs 300 HU",
+        "Document MI formula: MI(X,Y) = H(X) + H(Y) - H(X,Y) where H is entropy",
+        "Document: Why MI works for contrast/non-contrast (joint histogram learns intensity mapping)",
+        "Document: Example joint histogram for cardiac CT - what would it look like?",
+        "Document: Parzen window / kernel density estimation for differentiable MI",
+        "Document: GPU implementation challenges (histogram binning on GPU with AK.jl)",
+        "Document: How torchreg or other libraries implement MI (check ANTs, SimpleITK, etc.)",
+        "Document: Normalized Mutual Information (NMI) variant - why it might be better",
+        "Document: How to make MI differentiable for gradient-based optimization",
+        "Document: Mooncake rrule!! considerations for MI loss - can we autodiff through histograms?",
+        "Document: Expected computational cost vs MSE/NCC",
+        "Propose implementation approach with AK.jl",
+        "NO CODE IMPLEMENTATION - research and documentation only"
+      ],
+      "files": ["ralph_loop/progress.md"]
+    },
+    {
+      "id": "RESEARCH-PHYSICAL-001",
+      "type": "RESEARCH",
+      "title": "Research physical coordinate system and anisotropic voxels",
+      "status": "done",
+      "priority": 19,
+      "blockedBy": ["RESEARCH-MI-001"],
+      "description": "Research how to properly handle physical coordinates and anisotropic voxels. CONTEXT: Our cardiac CT case has 3mm z-spacing (static) vs 0.5mm z-spacing (moving) - that's 6x difference! Current library uses normalized [-1,1] and treats all voxels as isotropic. A 10-voxel displacement means very different things in physical space. Need to understand coordinate handling for accurate registration.",
+      "acceptanceCriteria": [
+        "Reference cardiac CT case: 3mm vs 0.5mm z-spacing, what happens if we ignore this?",
+        "Document: DICOM coordinate system in detail (LPS vs RAS)",
+        "Document: Key DICOM tags for our use case (SliceThickness vs SpacingBetweenSlices)",
+        "Document: NIfTI affine matrix and sform/qform",
+        "Document: How to compute physical position (mm) of any voxel",
+        "Document: The problem - current affine_grid assumes isotropic voxels",
+        "Document: Anisotropic grid generation (spacing-aware affine_grid)",
+        "Document: How PyTorch/torchreg handles this (or doesn't)",
+        "Document: Resampling strategies - should we resample 3mm to 0.5mm or vice versa?",
+        "Document: The 'register at low res, apply at high res' workflow in detail",
+        "Document: Transform interpolation - upsampling displacement field from 2mm to 0.5mm",
+        "Document: What resolution to register at? Trade-offs of 1mm vs 2mm vs 3mm",
+        "Propose API changes to support physical coordinates (PhysicalImage type?)",
+        "Example: Our two cardiac CTs - step by step what should happen?",
+        "NO CODE IMPLEMENTATION - research and documentation only"
+      ],
+      "files": ["ralph_loop/progress.md"]
+    },
+    {
+      "id": "RESEARCH-WORKFLOW-001",
+      "type": "RESEARCH",
+      "title": "Design end-to-end clinical CT registration workflow",
+      "status": "open",
+      "priority": 20,
+      "blockedBy": ["RESEARCH-PHYSICAL-001"],
+      "description": "Based on previous research, design the COMPLETE workflow for our specific use case: Patient has cardiac CT #1 (3mm, large FOV, non-contrast) and cardiac CT #2 (0.5mm, tight FOV, contrast). Goal: Register them so we can do quantitative analysis (calcium scoring, tissue density) on the registered result with EXACT HU preservation. Design concrete API and implementation plan.",
+      "acceptanceCriteria": [
+        "Write out the EXACT clinical scenario at the top with specific numbers",
+        "Document: Why this matters - calcium scoring requires accurate HU (130 HU threshold)",
+        "Document: Complete workflow from two DICOM folders to quantitatively accurate registered output",
+        "Document: Step 1 - Load both DICOM series, extract metadata",
+        "Document: Step 2 - Compute initial alignment from DICOM headers (are they already in same physical space?)",
+        "Document: Step 3 - Determine overlapping FOV (tight FOV is subset of large FOV)",
+        "Document: Step 4 - Create common reference grid at registration resolution (e.g., 2mm isotropic)",
+        "Document: Step 5 - Downsample BOTH to registration grid (bilinear ok, just for optimization)",
+        "Document: Step 6 - Register with MI loss + SyN diffeomorphic (handles local deformation)",
+        "Document: Step 7 - Upsample displacement field to 0.5mm resolution",
+        "Document: Step 8 - Apply transform to ORIGINAL 0.5mm image with nearest-neighbor",
+        "Document: Step 9 - Validation - check that output HU values are exact subset of input",
+        "Document: What if user wants to go the other direction (register static to moving)?",
+        "Propose: New structs/types (PhysicalImage, DICOMSeries, RegistrationWorkspace)",
+        "Propose: New functions (load_dicom_series, compute_overlap_region, resample_transform)",
+        "Propose: Changes to existing register() - add physical_coords=true option?",
+        "Propose: High-level API - register_clinical(dicom_folder1, dicom_folder2; preserve_hu=true)",
+        "Create implementation roadmap with story IDs and dependencies",
+        "Estimate complexity (S/M/L) and priority for each new feature",
+        "Identify which features are MUST-HAVE vs NICE-TO-HAVE for the cardiac CT use case",
+        "NO CODE IMPLEMENTATION - design and documentation only"
+      ],
+      "files": ["ralph_loop/progress.md"]
+    }
+  ]
+}
