@@ -5492,3 +5492,114 @@ flow_inverse = invert_displacement(flow_05mm; iterations=15)
 ```
 
 ---
+
+### [IMPL-CLINICAL-001] Implement high-level clinical registration API
+**Status**: DONE
+**Date**: 2024-02-04
+
+Implemented high-level clinical registration workflow for medical CT imaging.
+
+**Implementation**:
+- Created `src/clinical.jl` with complete clinical registration workflow
+- `register_clinical(moving::PhysicalImage, static::PhysicalImage; kwargs...)` - main entry point
+- `ClinicalRegistrationResult{T,N,A}` struct with moved_image, transform, inverse_transform, metrics, metadata
+- `transform_clinical(result, image)` - apply learned transform to other images
+- `transform_clinical_inverse(result, image)` - apply inverse transform
+
+**Features**:
+- Multi-resolution workflow: resample to registration resolution → register → upsample transform → apply
+- Support for anisotropic voxel spacing (handles images with different sizes after resampling)
+- MI loss for multi-modal registration (handles contrast mismatch)
+- HU preservation via nearest-neighbor interpolation (`preserve_hu=true`)
+- Both `:affine` and `:syn` registration types
+- Verbose mode with detailed progress information
+- GPU acceleration via MtlArrays
+
+**Key Technical Details**:
+- Handles size mismatch when images with different spacings are resampled to common resolution
+- Added `_resample_physical_to_size()` helper to resample PhysicalImage to specific size
+- Computes MI before/after for quality metrics
+- Preserves original HU values when `preserve_hu=true`
+
+**Tests** (35 tests in test/test_clinical.jl):
+- ClinicalRegistrationResult construction
+- 3D basic workflow
+- HU preservation verification
+- Anisotropic spacing handling
+- MI loss with different intensities
+- transform_clinical application
+- Error handling for wrong sizes
+- 2D registration
+- GPU array type preservation
+- Metadata completeness
+
+**Exports added**:
+- `ClinicalRegistrationResult`
+- `register_clinical`
+- `transform_clinical`
+- `transform_clinical_inverse`
+
+---
+
+### [TEST-CARDIAC-001] Test clinical registration on cardiac CT notebook
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+Updated `examples/cardiac_ct.jl` Pluto notebook with complete clinical registration workflow.
+
+**New Notebook Sections Added:**
+
+1. **Create PhysicalImage Objects**
+   - Converts loaded DICOM volumes to PhysicalImage with proper spacing metadata
+   - Handles Float32/Float64 type consistency for spacing tuples
+
+2. **Registration with Mutual Information**
+   - Full `register_clinical()` call with MI loss
+   - Parameters: registration_resolution=2mm, preserve_hu=true
+   - Uses affine registration with multi-scale pyramid (4,2,1)
+
+3. **Registration Metrics Display**
+   - Shows MI before/after registration
+   - Reports MI improvement and metadata (spacings, resolution, etc.)
+
+4. **HU Preservation Validation**
+   - Verifies output values ⊆ input values (set containment)
+   - Reports unique value counts before/after
+   - Confirms HU range preservation
+
+5. **Before/After Visualization**
+   - Side-by-side comparison of NC, CCTA before, CCTA after
+   - Checkerboard overlay for alignment assessment
+   - Difference image visualization
+
+6. **Interactive Slice Browser**
+   - PlutoUI slider to browse through slices
+   - Shows NC, registered CCTA, and checkerboard for each slice
+
+7. **Summary Table**
+   - When to use different loss functions (MSE vs MI)
+   - When to use different interpolation modes (bilinear vs nearest)
+
+**Technical Notes:**
+- Fixed type mismatch: DICOM z-spacing was Float64 while x,y were Float32
+- Added Float32.() conversion for spacing/origin tuples
+- Notebook runs successfully with real DICOM data
+- HU preservation verified: output values are subset of input values
+- All tests pass (35 tests in test/test_clinical.jl)
+
+**Acceptance Criteria Status:**
+- ✓ examples/cardiac_ct.jl updated with registration cells
+- ✓ Uses load_dicom_volume function to get PhysicalImage
+- ✓ Creates PhysicalImage from volume + spacing from DICOM metadata
+- ✓ Calls register_clinical(ccta, non_contrast; preserve_hu=true)
+- ✓ Visualizes: before/after alignment with checkerboard overlay
+- ✓ Visualizes: difference image before/after registration
+- ✓ Validates: Output HU values are exact subset of input (nearest-neighbor working)
+- ✓ Validates: MI metrics reported (MI before/after/improvement)
+- ✓ Reports: Registration metrics (MI before/after, spacing info)
+- ✓ Reports: Physical metadata (spacing, size, FOV)
+- ✓ Handles the 3mm vs 0.5mm resolution difference correctly
+- ✓ Works on Metal GPU (via MtlArray through register_clinical)
+- ✓ Add markdown cells explaining each step of the workflow
+- ✓ Notebook can be run end-to-end without errors (except @bind which requires Pluto)
