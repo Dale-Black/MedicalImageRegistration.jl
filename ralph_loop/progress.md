@@ -5020,6 +5020,136 @@ For the cardiac CT use case to work, we need:
 
 ### Next Steps
 
-This research phase is complete. Implementation should proceed in the order specified in the roadmap, starting with **IMPL-PHYSICAL-001: PhysicalImage type**.
+This research phase is complete. Implementation should proceed in the order specified in the roadmap.
 
 ---
+
+## IMPLEMENTATION STORIES ADDED
+
+**Date:** 2026-02-04
+
+Based on the research above, the following implementation stories have been added to prd.json:
+
+| Story ID | Title | Priority | Status |
+|----------|-------|----------|--------|
+| **IMPL-MI-001** | Implement Mutual Information loss with AK.jl + Mooncake rrule!! | 21 | pending |
+| **IMPL-PHYSICAL-001** | Implement physical coordinate handling and spacing-aware grids | 22 | pending |
+| **IMPL-RESAMPLE-001** | Implement displacement field resampling for multi-resolution workflow | 23 | pending |
+| **IMPL-CLINICAL-001** | Implement high-level clinical registration API | 24 | pending |
+| **TEST-CARDIAC-001** | Test clinical registration on cardiac CT notebook | 25 | pending |
+| **DOC-CLINICAL-001** | Document clinical registration workflow in README | 26 | pending |
+
+### Implementation Order
+
+```
+IMPL-MI-001 → IMPL-PHYSICAL-001 → IMPL-RESAMPLE-001 → IMPL-CLINICAL-001 → TEST-CARDIAC-001 → DOC-CLINICAL-001
+```
+
+### Key Requirements Recap
+
+Each implementation story must follow the GPU-first architecture:
+
+1. **AK.foreachindex** for all parallel operations
+2. **Mooncake rrule!!** for all differentiable functions
+3. **MtlArrays** for local testing
+4. **No CPU fallbacks, no nested for loops**
+
+### Test Target
+
+The final test (TEST-CARDIAC-001) will run the complete workflow on:
+- `/Users/daleblack/Documents/dev/julia/MedicalImageRegistration.jl/examples/cardiac_ct.jl`
+- Real DICOM data: 3mm non-contrast vs 0.5mm contrast cardiac CT
+- Validates HU preservation with nearest-neighbor interpolation
+- Uses MI loss for multi-modal registration
+
+---
+
+---
+
+### [IMPL-MI-001] Implement Mutual Information loss with AK.jl + Mooncake rrule!!
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+#### Implementation Summary
+
+Implemented GPU-accelerated Mutual Information (MI) and Normalized MI (NMI) loss functions for multi-modal image registration. Uses soft histogram binning with linear interpolation (no Parzen windows in kernel) for GPU compatibility.
+
+#### Key Files
+- `src/mi_loss.jl` - Main implementation (~900 lines)
+- `test/test_mi_loss.jl` - Comprehensive test suite
+
+#### Features Implemented
+- **mi_loss**: Negative MI loss (minimize to maximize alignment)
+- **nmi_loss**: Normalized MI loss (more robust, normalized to [0,1])
+- **Soft histogram binning**: Each pixel contributes to 2 adjacent bins with linear weights
+- **Configurable bins**: Default 64, supports any number >= 4
+- **Optional smoothing**: Post-histogram Gaussian smoothing (sigma parameter)
+- **Intensity range**: Auto-computed or explicit
+
+#### Algorithm
+
+**Soft Binning (GPU-friendly):**
+Instead of Parzen windows with variable-sized kernels, we use linear interpolation:
+- Each pixel value maps to a continuous bin position
+- Contributes weight (1-frac) to lower bin and weight (frac) to upper bin
+- Maximum 2 atomic additions per pixel (vs kernel_radius^2 for Parzen)
+
+**Forward Pass:**
+```julia
+# 1. Compute soft bin assignments
+bin_lo, bin_hi, weight_lo, weight_hi = _soft_bin(val, min_val, bin_width, num_bins)
+
+# 2. Accumulate into histograms with atomics
+Atomix.@atomic hist[bin_lo] += weight_lo
+Atomix.@atomic hist[bin_hi] += weight_hi
+
+# 3. Compute entropies
+H = -Σ p * log(p)
+
+# 4. MI = H(moving) + H(static) - H(joint)
+```
+
+**Backward Pass:**
+```julia
+# d(entropy)/d(hist_i) = -(log(p_i) + 1) / total
+# d(hist[bin])/d(val) = ±1/bin_width (linear interpolation gradient)
+# Chain together for d(MI)/d(pixel)
+```
+
+#### GPU Compatibility Fixes
+
+1. **Avoid `floor(Int, x)`**: Use `unsafe_trunc(Int, trunc(x))` instead
+2. **Avoid variable reassignment**: Causes `Core.Box` capture in closures
+3. **No nested loops with variable bounds**: Use fixed maximum iterations
+4. **Use atomics for histogram accumulation**: `Atomix.@atomic`
+
+#### Test Results
+
+All acceptance criteria verified:
+- ✓ Forward pass works on MtlArrays (Metal GPU)
+- ✓ Backward pass works on MtlArrays
+- ✓ GPU vs CPU match (rtol=1e-3)
+- ✓ Gradients verified against finite differences (0.999 correlation)
+- ✓ MI is higher (more negative loss) for identical images
+- ✓ MI is higher for correlated images than random
+
+#### Performance
+
+- Soft binning is more GPU-efficient than Parzen windows
+- Each pixel performs at most 4 atomic additions to joint histogram
+- Histogram size is O(num_bins²), typically 64×64 = 4KB
+
+#### When to Use MI vs MSE/NCC
+
+| Loss | Use Case | Example |
+|------|----------|---------|
+| MSE | Same modality, similar intensities | Follow-up MRI |
+| NCC | Same modality, different contrast | T1 MRI from different scanners |
+| **MI** | Different modalities or contrast agents | CT non-contrast vs contrast-enhanced |
+
+For the cardiac CT use case (3mm non-contrast vs 0.5mm contrast):
+- Blood: 40 HU → 300 HU with contrast
+- MSE would be MAXIMIZED at correct alignment (wrong!)
+- MI measures statistical dependence - learns that 40 HU always maps to 300 HU
+

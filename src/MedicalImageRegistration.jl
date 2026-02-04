@@ -15,6 +15,7 @@ include("grid_sample.jl")
 include("affine_grid.jl")
 include("compose_affine.jl")
 include("metrics.jl")
+include("mi_loss.jl")
 
 # Registration types and algorithms
 include("types.jl")
@@ -26,6 +27,7 @@ export grid_sample
 export affine_grid
 export compose_affine
 export mse_loss, dice_loss, dice_score, ncc_loss
+export mi_loss, nmi_loss
 
 # Exports - SyN operations
 export spatial_transform, diffeomorphic_transform, composition_transform

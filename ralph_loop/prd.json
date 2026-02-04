@@ -420,6 +420,152 @@
         "NO CODE IMPLEMENTATION - design and documentation only"
       ],
       "files": ["ralph_loop/progress.md"]
+    },
+    {
+      "id": "IMPL-MI-001",
+      "type": "IMPL",
+      "title": "Implement Mutual Information loss with AK.jl + Mooncake rrule!!",
+      "status": "done",
+      "priority": 21,
+      "blockedBy": ["RESEARCH-WORKFLOW-001"],
+      "description": "Implement Mutual Information (MI) loss for multi-modal registration. CONTEXT: For cardiac CT registration (3mm non-contrast vs 0.5mm contrast), MSE fails because contrast changes blood from 40 HU to 300+ HU. MI measures statistical dependence - learns that 40 HU non-contrast = 300 HU contrast. Use differentiable Parzen window estimation. Must work on GPU with AK.jl and have Mooncake rrule!! for backward pass.",
+      "acceptanceCriteria": [
+        "src/mi_loss.jl with mi_loss function",
+        "Differentiable via Parzen window / kernel density estimation",
+        "Forward pass: compute joint histogram with AK.foreachindex, then entropy",
+        "Backward pass: Mooncake rrule!! using AK.foreachindex",
+        "Configurable: number of bins (default 64), kernel sigma",
+        "Also implement nmi_loss (Normalized MI) - more robust",
+        "Works on MtlArrays - GPU accelerated",
+        "Test: mi_loss handles contrast/non-contrast correctly (should decrease as alignment improves)",
+        "Test: Gradients verified against finite differences",
+        "Test: Matches reference implementation (compare to SimpleITK or ANTs MI if possible)",
+        "Document in code: why MI for multi-modal, when to use vs MSE/NCC"
+      ],
+      "files": ["src/mi_loss.jl", "test/test_mi_loss.jl"]
+    },
+    {
+      "id": "IMPL-PHYSICAL-001",
+      "type": "IMPL",
+      "title": "Implement physical coordinate handling and spacing-aware grids",
+      "status": "pending",
+      "priority": 22,
+      "blockedBy": ["IMPL-MI-001"],
+      "description": "Add physical coordinate support for anisotropic voxels. CONTEXT: Cardiac CT case has 3mm z-spacing (static) vs 0.5mm z-spacing (moving) - 6x difference! Current library assumes isotropic normalized [-1,1]. Need spacing-aware grid generation. Add PhysicalImage type that wraps array + spacing + origin. Modify affine_grid and grid_sample to handle physical coordinates.",
+      "acceptanceCriteria": [
+        "src/physical.jl with PhysicalImage{T,N} struct wrapping (data, spacing, origin)",
+        "PhysicalImage stores: data array (X,Y,Z,C,N), spacing tuple (mm), origin tuple (mm)",
+        "Constructor: PhysicalImage(data; spacing=(1,1,1), origin=(0,0,0))",
+        "affine_grid_physical(theta, image::PhysicalImage) - generates grid in physical coordinates",
+        "Grid accounts for anisotropic spacing (a 1mm translation in z = 2 voxels at 0.5mm spacing)",
+        "grid_sample works with PhysicalImage, respecting spacing",
+        "resample(image::PhysicalImage, target_spacing) - resample to new spacing",
+        "resample uses spacing-aware grid internally",
+        "Mooncake rrule!! for all new differentiable operations",
+        "Works on MtlArrays with AK.foreachindex",
+        "Test: Create PhysicalImage with anisotropic spacing, verify grid is correct",
+        "Test: Affine transform accounts for spacing difference",
+        "Test: Round-trip resample(img, new_spacing) then resample back preserves shape/values"
+      ],
+      "files": ["src/physical.jl", "test/test_physical.jl"]
+    },
+    {
+      "id": "IMPL-RESAMPLE-001",
+      "type": "IMPL",
+      "title": "Implement displacement field resampling for multi-resolution workflow",
+      "status": "pending",
+      "priority": 23,
+      "blockedBy": ["IMPL-PHYSICAL-001"],
+      "description": "Implement functions to upsample/downsample displacement fields. CONTEXT: For cardiac CT workflow, we register at low resolution (2mm isotropic for speed) but need to apply the transform to the high-resolution (0.5mm) original image. Need to upsample the displacement field while maintaining diffeomorphic properties. Also need inverse transform computation for bidirectional registration.",
+      "acceptanceCriteria": [
+        "src/resample_transform.jl with core functions",
+        "resample_displacement(disp_field, target_size) - bilinear/trilinear upsample of displacement field",
+        "Displacement values scaled by resolution ratio (2mm->0.5mm means 4x the voxel displacement)",
+        "resample_velocity(velocity_field, target_size) - for SyN velocity fields",
+        "upsample_affine_transform(theta, old_size, new_size) - adjust affine for resolution change",
+        "invert_displacement(disp_field; iterations=10) - iterative inverse (for bidirectional)",
+        "All use AK.foreachindex for GPU",
+        "All have Mooncake rrule!! (even if gradient is rarely needed)",
+        "Works on MtlArrays",
+        "Test: Upsample 2x then downsample 2x ≈ identity",
+        "Test: Displacement scaling is correct (value * resolution_ratio)",
+        "Test: Inverse displacement field inverts original transform (within tolerance)"
+      ],
+      "files": ["src/resample_transform.jl", "test/test_resample_transform.jl"]
+    },
+    {
+      "id": "IMPL-CLINICAL-001",
+      "type": "IMPL",
+      "title": "Implement high-level clinical registration API",
+      "status": "pending",
+      "priority": 24,
+      "blockedBy": ["IMPL-RESAMPLE-001"],
+      "description": "Implement high-level API for clinical CT registration workflow. Combines all previous features into a simple interface. Takes two PhysicalImage arrays, handles resolution mismatch, uses MI loss, applies transform with HU preservation. Should be usable directly from the cardiac_ct.jl notebook.",
+      "acceptanceCriteria": [
+        "src/clinical.jl with high-level functions",
+        "register_clinical(moving::PhysicalImage, static::PhysicalImage; kwargs) - main entry point",
+        "Parameters: registration_resolution (default 2mm), loss_fn (default mi_loss), preserve_hu (default true)",
+        "Workflow: 1) resample both to registration_resolution, 2) run registration with MI, 3) upsample transform, 4) apply to original with nearest-neighbor",
+        "ClinicalRegistrationResult struct with: moved_image, transform, metrics, metadata",
+        "transform_clinical(result, image::PhysicalImage) - apply learned transform to another image",
+        "Support both AffineRegistration and SyNRegistration via registration_type kwarg",
+        "Works entirely on GPU (MtlArrays)",
+        "Verbose mode prints: resolution info, registration progress, final metrics",
+        "Test: Full workflow with synthetic anisotropic images",
+        "Test: Output HU values ⊆ input HU values when preserve_hu=true",
+        "Document: Complete example in docstring"
+      ],
+      "files": ["src/clinical.jl", "test/test_clinical.jl"]
+    },
+    {
+      "id": "TEST-CARDIAC-001",
+      "type": "TEST",
+      "title": "Test clinical registration on cardiac CT notebook",
+      "status": "pending",
+      "priority": 25,
+      "blockedBy": ["IMPL-CLINICAL-001"],
+      "description": "Update cardiac_ct.jl notebook to use the new clinical registration API. Test the full pipeline: load DICOMs -> create PhysicalImage -> register with MI loss -> apply transform with HU preservation -> visualize and validate results. This is the ultimate integration test for the cardiac CT use case.",
+      "acceptanceCriteria": [
+        "examples/cardiac_ct.jl updated with registration cells",
+        "Uses load_dicom_volume function already in notebook to get PhysicalImage",
+        "Creates PhysicalImage from volume + spacing from DICOM metadata",
+        "Calls register_clinical(ccta, non_contrast; preserve_hu=true)",
+        "Visualizes: before/after alignment with checkerboard overlay",
+        "Visualizes: difference image before/after registration",
+        "Validates: Output HU values are exact subset of input (nearest-neighbor working)",
+        "Validates: MI loss decreased (alignment improved)",
+        "Reports: Registration metrics (MI before/after, NCC before/after)",
+        "Reports: Physical metadata (spacing, size, FOV)",
+        "Handles the 3mm vs 0.5mm resolution difference correctly",
+        "Works on Metal GPU",
+        "Add markdown cells explaining each step of the workflow",
+        "Notebook can be run end-to-end without errors"
+      ],
+      "files": ["examples/cardiac_ct.jl"]
+    },
+    {
+      "id": "DOC-CLINICAL-001",
+      "type": "IMPL",
+      "title": "Document clinical registration workflow in README",
+      "status": "pending",
+      "priority": 26,
+      "blockedBy": ["TEST-CARDIAC-001"],
+      "description": "Update README with clinical registration documentation. Add new section explaining the multi-modal registration workflow with concrete cardiac CT example. Document when to use MI vs MSE/NCC. Document physical coordinate handling and HU preservation.",
+      "acceptanceCriteria": [
+        "README.md has new 'Clinical CT Registration' section",
+        "Documents the cardiac CT scenario: non-contrast 3mm vs contrast 0.5mm",
+        "Shows complete code example using register_clinical()",
+        "Explains MI loss and when to use it (contrast mismatch)",
+        "Explains physical coordinates and why they matter (anisotropic voxels)",
+        "Explains HU preservation workflow (preserve_hu=true)",
+        "Documents PhysicalImage type and how to create one",
+        "Documents ClinicalRegistrationResult and what it contains",
+        "Table: Which loss to use (MSE for same-modality, MI for different-modality)",
+        "Table: Interpolation mode selection (bilinear for visual, nearest for quantitative)",
+        "Link to cardiac_ct.jl notebook as example",
+        "Clear API reference for new functions"
+      ],
+      "files": ["README.md"]
     }
   ]
 }
