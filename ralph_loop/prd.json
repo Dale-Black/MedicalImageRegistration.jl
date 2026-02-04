@@ -392,7 +392,7 @@
       "id": "RESEARCH-WORKFLOW-001",
       "type": "RESEARCH",
       "title": "Design end-to-end clinical CT registration workflow",
-      "status": "open",
+      "status": "done",
       "priority": 20,
       "blockedBy": ["RESEARCH-PHYSICAL-001"],
       "description": "Based on previous research, design the COMPLETE workflow for our specific use case: Patient has cardiac CT #1 (3mm, large FOV, non-contrast) and cardiac CT #2 (0.5mm, tight FOV, contrast). Goal: Register them so we can do quantitative analysis (calcium scoring, tissue density) on the registered result with EXACT HU preservation. Design concrete API and implementation plan.",

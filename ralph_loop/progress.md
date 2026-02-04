@@ -3901,3 +3901,1125 @@ println("Output HU range: ", extrema(output))
 This will synthesize all research into a concrete implementation plan.
 
 ---
+
+### [RESEARCH-WORKFLOW-001] Design end-to-end clinical CT registration workflow
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+---
+
+## THE EXACT CLINICAL SCENARIO
+
+### Patient Profile
+
+**65-year-old male with suspected coronary artery disease**
+
+The cardiologist needs to compare calcium scoring from two CT scans taken 6 months apart to assess disease progression. The scans have different acquisition parameters, which is common in clinical practice.
+
+### The Two Scans
+
+| Property | Scan 1 (Static/Reference) | Scan 2 (Moving) |
+|----------|---------------------------|-----------------|
+| **Date** | January 2026 | July 2026 |
+| **Protocol** | Non-contrast Calcium Score | Contrast-enhanced CTA |
+| **Contrast** | **None** | **Iodinated IV contrast** |
+| **Slice Thickness** | **3.0 mm** | **0.5 mm** |
+| **Reconstruction Interval** | 3.0 mm | 0.4 mm (overlapping) |
+| **In-plane Resolution** | 0.5 mm × 0.5 mm | 0.4 mm × 0.4 mm |
+| **Matrix Size** | 512 × 512 | 512 × 512 |
+| **Number of Slices** | 100 | 750 |
+| **Total z Coverage** | 300 mm | 300 mm |
+| **FOV** | **Large** (350 mm, full thorax) | **Tight** (205 mm, heart-focused) |
+| **kVp** | 120 | 100 |
+| **Tube Current** | 150 mAs | 400 mAs (dose modulation) |
+
+### Critical Intensity Differences (Contrast Effect)
+
+| Structure | Non-contrast (Scan 1) | Contrast (Scan 2) | Δ HU |
+|-----------|----------------------|-------------------|------|
+| LV Blood Pool | 40 HU | 350 HU | **+310** |
+| Aortic Root | 45 HU | 400 HU | **+355** |
+| Coronary Arteries | 40 HU | 320 HU | **+280** |
+| Myocardium | 50 HU | 110 HU | +60 |
+| Coronary Calcium | 400-1200 HU | 400-1200 HU | **0** (unchanged!) |
+| Pericardial Fat | -90 HU | -90 HU | 0 |
+| Lung | -850 HU | -850 HU | 0 |
+
+**Key observation:** Calcium does NOT change with contrast (already maximally attenuating). This is critical for our registration!
+
+### Clinical Goals
+
+**PRIMARY GOAL: Compare calcium scores accurately**
+
+The Agatston calcium scoring method requires:
+- Threshold: **130 HU** (pixels ≥130 HU are considered calcium)
+- Area: minimum 1 mm² per lesion
+- Score: Weighted by maximum HU per lesion
+
+**Why registration is necessary:**
+1. Different slice positions mean calcium may appear in different slices
+2. Patient positioning varies between scans
+3. Heart phase may differ (though both should be diastolic gated)
+4. Need voxel-to-voxel correspondence for progression analysis
+
+**Accuracy requirements:**
+- Spatial: **< 1mm error** (for small calcifications)
+- HU: **EXACT values** (interpolation creates false HU values near threshold)
+
+### Why This Is Hard
+
+1. **6x resolution difference** in z (3mm vs 0.5mm)
+2. **Intensity mismatch** - blood goes from 40 to 350 HU
+3. **FOV mismatch** - contrast scan misses lateral lungs
+4. **MSE/NCC fail** - they assume intensity similarity
+5. **Bilinear interpolation fails** - creates false 130-140 HU values
+
+---
+
+## WHY THIS MATTERS: THE 130 HU THRESHOLD
+
+### Calcium Scoring Physics
+
+Coronary artery calcium appears bright on CT because:
+- Calcium has high atomic number (Z=20)
+- High electron density → high X-ray attenuation
+- Measured HU typically 400-1200+
+
+**The 130 HU threshold:**
+- Derived from 3mm slice thickness
+- Separates calcium from soft tissue (typically <100 HU)
+- Some scanners use 90 HU for thin slices due to reduced partial volume
+
+### How Interpolation Breaks Calcium Scoring
+
+**Scenario:** Small calcification at border of two voxels
+
+```
+Original values:          After bilinear interpolation:
+
+ [0]  [500]                [0]  [250]  [500]
+ HU    HU                  HU    HU     HU
+
+                           The interpolated 250 HU creates
+                           a FALSE POSITIVE at this location
+                           in the registered image!
+```
+
+**Or worse:**
+
+```
+Original:                  After interpolation:
+
+[200]  [0]                 [200]  [100]  [0]
+ HU    HU                   HU     HU    HU
+
+                           The interpolated 100 HU creates
+                           a FALSE NEGATIVE - calcium below
+                           threshold disappears!
+```
+
+### Real Clinical Impact
+
+| Scenario | Bilinear Result | Nearest Result | Clinical Impact |
+|----------|-----------------|----------------|-----------------|
+| Small calcification diluted | HU drops below 130 | Exact HU preserved | Miss calcium → underdiagnosis |
+| Soft tissue near calcium | False 130+ HU | Exact HU preserved | False positive → overdiagnosis |
+| Calcium score comparison | Inconsistent scores | Reproducible scores | Incorrect progression assessment |
+
+**This is why HU preservation via nearest-neighbor is MANDATORY for quantitative analysis.**
+
+---
+
+## COMPLETE WORKFLOW: DICOM TO REGISTERED OUTPUT
+
+### Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  INPUT: Two DICOM folders                                           │
+│  - static_folder/: 100 DICOM files (3mm non-contrast)              │
+│  - moving_folder/: 750 DICOM files (0.5mm contrast)                │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  STEP 1: LOAD DICOM SERIES                                          │
+│  → Extract image data + spatial metadata                            │
+│                                                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  STEP 2: COMPUTE INITIAL ALIGNMENT                                  │
+│  → Use DICOM headers to establish physical correspondence           │
+│                                                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  STEP 3: DETERMINE OVERLAPPING FOV                                  │
+│  → Compute intersection of physical extents                         │
+│  → Create validity mask                                             │
+│                                                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  STEP 4: CREATE COMMON REFERENCE GRID                               │
+│  → Choose 2mm isotropic for registration                            │
+│  → Define grid covering overlap region                              │
+│                                                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  STEP 5: DOWNSAMPLE BOTH TO REGISTRATION GRID                       │
+│  → Bilinear resample (working copies only)                         │
+│  → Original images PRESERVED                                        │
+│                                                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  STEP 6: REGISTER WITH MI LOSS + SyN                                │
+│  → Mutual Information handles contrast difference                   │
+│  → Diffeomorphic for local deformation                             │
+│  → Multi-resolution pyramid                                         │
+│                                                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  STEP 7: UPSAMPLE DISPLACEMENT FIELD                                │
+│  → Bilinear interpolation of smooth displacement                   │
+│  → 2mm → 0.5mm (native moving resolution)                          │
+│                                                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  STEP 8: APPLY TRANSFORM WITH NEAREST-NEIGHBOR                      │
+│  → Apply high-res displacement to ORIGINAL moving                  │
+│  → interpolation=:nearest → HU PRESERVED                           │
+│                                                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  STEP 9: VALIDATION                                                 │
+│  → Verify HU values are exact subset of input                      │
+│  → Check alignment quality                                          │
+│                                                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│  OUTPUT                                                              │
+│  - Registered image at 0.5mm resolution                            │
+│  - HU values EXACTLY preserved                                      │
+│  - Aligned to static scan's coordinate system                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## STEP 1: LOAD DICOM SERIES
+
+### What Needs to Happen
+
+1. Read all DICOM files in folder
+2. Sort by instance number or slice position
+3. Extract pixel data into 3D array
+4. Extract spatial metadata for coordinate handling
+
+### Key DICOM Tags to Extract
+
+```julia
+# Per-series (from any slice)
+PixelSpacing       # (0028,0030) - [row_spacing, col_spacing]
+Rows               # (0028,0010) - matrix rows
+Columns            # (0028,0011) - matrix columns
+ImageOrientationPatient  # (0020,0037) - direction cosines
+
+# Per-slice (varies by slice)
+ImagePositionPatient     # (0020,0032) - physical position
+InstanceNumber          # (0020,0013) - for sorting
+SliceLocation           # (0020,1041) - physical z position
+
+# For HU conversion
+RescaleSlope      # (0028,1053) - typically 1.0
+RescaleIntercept  # (0028,1052) - typically -1024
+```
+
+### Implementation
+
+```julia
+using DICOM
+
+struct DICOMSeries{T}
+    data::Array{T, 3}                    # Voxel data (X, Y, Z)
+    spacing::NTuple{3, T}                # (x_spacing, y_spacing, z_spacing) mm
+    origin::NTuple{3, T}                 # Position of first voxel (mm)
+    direction::NTuple{3, NTuple{3, T}}   # Direction cosines
+    metadata::Dict{String, Any}          # Additional DICOM tags
+end
+
+function load_dicom_series(folder::String)
+    # Find all DICOM files
+    files = filter(f -> is_dicom_file(f), readdir(folder, join=true))
+
+    # Read and sort by position
+    slices = [(DICOM.dcm_parse(f), f) for f in files]
+    sort!(slices, by=s -> get_slice_position(s[1]))
+
+    # Extract spatial info from first slice
+    first_dcm = slices[1][1]
+    pixel_spacing = first_dcm[tag"PixelSpacing"]  # [row, col] = [y, x]!
+    orientation = first_dcm[tag"ImageOrientationPatient"]
+    first_position = first_dcm[tag"ImagePositionPatient"]
+
+    # Compute slice spacing from positions
+    if length(slices) > 1
+        pos1 = slices[1][1][tag"ImagePositionPatient"]
+        pos2 = slices[2][1][tag"ImagePositionPatient"]
+        slice_spacing = norm(pos2 - pos1)
+    else
+        slice_spacing = first_dcm[tag"SliceThickness"]
+    end
+
+    # Build 3D array
+    # Note: DICOM pixel data is (rows, cols) = (Y, X)
+    # We want Julia convention (X, Y, Z)
+    n_slices = length(slices)
+    rows, cols = first_dcm[tag"Rows"], first_dcm[tag"Columns"]
+
+    data = Array{Float32}(undef, cols, rows, n_slices)
+
+    for (i, (dcm, _)) in enumerate(slices)
+        pixel_data = dcm[tag"PixelData"]
+        slope = get(dcm, tag"RescaleSlope", 1.0)
+        intercept = get(dcm, tag"RescaleIntercept", 0.0)
+
+        # Convert to HU and transpose to (X, Y)
+        slice_hu = Float32.(pixel_data) .* slope .+ intercept
+        data[:, :, i] = permutedims(slice_hu, (2, 1))  # (rows,cols) → (X,Y)
+    end
+
+    return DICOMSeries(
+        data,
+        (Float32(pixel_spacing[2]), Float32(pixel_spacing[1]), Float32(slice_spacing)),
+        Tuple(Float32.(first_position)),
+        parse_orientation(orientation),
+        Dict("folder" => folder, "n_files" => length(files))
+    )
+end
+```
+
+---
+
+## STEP 2: COMPUTE INITIAL ALIGNMENT FROM HEADERS
+
+### Why This Matters
+
+DICOM images are acquired in **physical coordinates**. Two scans of the same patient should already be roughly aligned if:
+- Same scanner (or calibrated scanners)
+- Patient positioned similarly
+- Same body region
+
+### Implementation
+
+```julia
+function compute_initial_alignment(static::DICOMSeries, moving::DICOMSeries)
+    # Both images are in LPS coordinates
+    # If from same scanner/session, origins should be close
+
+    # Compute translation to align origins
+    translation = static.origin .- moving.origin
+
+    # Check if significant rotation needed (rare for same-scanner)
+    # direction matrices should be nearly identical for standard axial
+    rotation_diff = maximum(abs.(flatten(static.direction) .- flatten(moving.direction)))
+
+    if rotation_diff > 0.01
+        @warn "Significant orientation difference detected. May need rigid registration."
+    end
+
+    # Initial affine: identity rotation + translation
+    affine = Float32[
+        1.0  0.0  0.0  translation[1];
+        0.0  1.0  0.0  translation[2];
+        0.0  0.0  1.0  translation[3];
+        0.0  0.0  0.0  1.0
+    ]
+
+    return affine
+end
+```
+
+### For Our Cardiac CT Case
+
+```julia
+# Typical values
+static.origin = (-175.0, -175.0, 0.0)  # Large FOV, centered
+moving.origin = (-102.5, -102.5, 0.0)  # Tight FOV, centered on heart
+
+# Translation to align:
+translation = (-175.0 - (-102.5), -175.0 - (-102.5), 0.0)
+            = (-72.5, -72.5, 0.0) mm
+```
+
+---
+
+## STEP 3: DETERMINE OVERLAPPING FOV
+
+### The Problem
+
+```
+Static FOV (large):          Moving FOV (tight):
+┌──────────────────────┐
+│                      │
+│    ┌──────────┐      │     ┌──────────┐
+│    │          │      │     │          │
+│    │  HEART   │      │     │  HEART   │
+│    │          │      │     │          │
+│    └──────────┘      │     └──────────┘
+│                      │
+└──────────────────────┘
+
+Overlap = Moving FOV (subset of Static)
+```
+
+### Implementation
+
+```julia
+struct PhysicalExtent{T}
+    x_min::T; x_max::T
+    y_min::T; y_max::T
+    z_min::T; z_max::T
+end
+
+function compute_extent(series::DICOMSeries)
+    # Physical extent = origin + size * spacing
+    size = size(series.data)
+    extent = (size .- 1) .* series.spacing
+
+    PhysicalExtent(
+        series.origin[1], series.origin[1] + extent[1],
+        series.origin[2], series.origin[2] + extent[2],
+        series.origin[3], series.origin[3] + extent[3]
+    )
+end
+
+function compute_overlap(static::DICOMSeries, moving::DICOMSeries)
+    ext_s = compute_extent(static)
+    ext_m = compute_extent(moving)
+
+    # Intersection
+    overlap = PhysicalExtent(
+        max(ext_s.x_min, ext_m.x_min), min(ext_s.x_max, ext_m.x_max),
+        max(ext_s.y_min, ext_m.y_min), min(ext_s.y_max, ext_m.y_max),
+        max(ext_s.z_min, ext_m.z_min), min(ext_s.z_max, ext_m.z_max)
+    )
+
+    # Validate overlap exists
+    if overlap.x_max <= overlap.x_min ||
+       overlap.y_max <= overlap.y_min ||
+       overlap.z_max <= overlap.z_min
+        error("No overlap between images!")
+    end
+
+    return overlap
+end
+
+function create_fov_mask(series::DICOMSeries, overlap::PhysicalExtent)
+    # Create binary mask: 1 where overlap, 0 elsewhere
+    mask = zeros(Float32, size(series.data))
+
+    for k in axes(mask, 3), j in axes(mask, 2), i in axes(mask, 1)
+        phys = voxel_to_physical(series, i, j, k)
+        if overlap.x_min <= phys[1] <= overlap.x_max &&
+           overlap.y_min <= phys[2] <= overlap.y_max &&
+           overlap.z_min <= phys[3] <= overlap.z_max
+            mask[i, j, k] = 1.0f0
+        end
+    end
+
+    return mask
+end
+```
+
+### For Our Case
+
+```julia
+# Static: 350mm FOV → extent ~(-175, 175) in x,y
+# Moving: 205mm FOV → extent ~(-102.5, 102.5) in x,y
+
+overlap = PhysicalExtent(
+    -102.5, 102.5,   # x: moving's range
+    -102.5, 102.5,   # y: moving's range
+    0.0, 300.0       # z: both cover same range
+)
+# Overlap is 205mm × 205mm × 300mm
+```
+
+---
+
+## STEP 4: CREATE COMMON REFERENCE GRID
+
+### Choosing Registration Resolution
+
+| Resolution | Grid Size | Memory | Speed | Accuracy |
+|------------|-----------|--------|-------|----------|
+| 4mm | 52×52×75 | ~20 MB | Very fast | Low |
+| **2mm** | **103×103×150** | **~80 MB** | Fast | **Good** |
+| 1mm | 205×205×300 | ~600 MB | Slow | High |
+
+**Recommendation: 2mm isotropic** - good balance for cardiac CT.
+
+### Implementation
+
+```julia
+struct RegistrationGrid{T}
+    origin::NTuple{3, T}
+    spacing::NTuple{3, T}
+    size::NTuple{3, Int}
+end
+
+function create_registration_grid(overlap::PhysicalExtent, target_spacing::NTuple{3,T}) where T
+    # Compute grid size to cover overlap
+    extent = (
+        overlap.x_max - overlap.x_min,
+        overlap.y_max - overlap.y_min,
+        overlap.z_max - overlap.z_min
+    )
+
+    grid_size = (
+        ceil(Int, extent[1] / target_spacing[1]) + 1,
+        ceil(Int, extent[2] / target_spacing[2]) + 1,
+        ceil(Int, extent[3] / target_spacing[3]) + 1
+    )
+
+    RegistrationGrid(
+        (overlap.x_min, overlap.y_min, overlap.z_min),
+        target_spacing,
+        grid_size
+    )
+end
+```
+
+### For Our Case
+
+```julia
+reg_grid = create_registration_grid(overlap, (2.0f0, 2.0f0, 2.0f0))
+# → size = (103, 103, 151)
+# → 103 × 103 × 151 = 1.6M voxels (vs 196M in original 0.5mm)
+```
+
+---
+
+## STEP 5: DOWNSAMPLE BOTH TO REGISTRATION GRID
+
+### Key Principle
+
+**These are WORKING COPIES for optimization only. Original images are NEVER modified.**
+
+### Implementation
+
+```julia
+function resample_to_grid(series::DICOMSeries{T}, grid::RegistrationGrid{T}) where T
+    output = Array{T}(undef, grid.size...)
+
+    # For each output voxel, find corresponding physical position
+    # and sample from input using trilinear interpolation
+    for k in 1:grid.size[3], j in 1:grid.size[2], i in 1:grid.size[1]
+        # Physical position of output voxel
+        phys = (
+            grid.origin[1] + (i - 1) * grid.spacing[1],
+            grid.origin[2] + (j - 1) * grid.spacing[2],
+            grid.origin[3] + (k - 1) * grid.spacing[3]
+        )
+
+        # Convert to input voxel coordinates
+        voxel = physical_to_voxel(series, phys...)
+
+        # Trilinear interpolation (bilinear ok for working copies)
+        output[i, j, k] = trilinear_sample(series.data, voxel...)
+    end
+
+    return output
+end
+```
+
+### GPU-Accelerated Version
+
+```julia
+function resample_to_grid_gpu(series_data::AbstractArray{T}, series_info, grid::RegistrationGrid{T}) where T
+    output = similar(series_data, grid.size...)
+
+    AK.foreachindex(output) do idx
+        i, j, k = linear_to_3d(idx, grid.size)
+
+        phys = (
+            grid.origin[1] + (i - 1) * grid.spacing[1],
+            grid.origin[2] + (j - 1) * grid.spacing[2],
+            grid.origin[3] + (k - 1) * grid.spacing[3]
+        )
+
+        voxel = physical_to_voxel(series_info, phys)
+        output[i, j, k] = trilinear_sample_gpu(series_data, voxel...)
+    end
+
+    return output
+end
+```
+
+---
+
+## STEP 6: REGISTER WITH MI LOSS + SyN
+
+### Why MI Loss?
+
+**Blood in LV:**
+- Static (non-contrast): 40 HU
+- Moving (contrast): 350 HU
+
+**MSE:** (350 - 40)² = 96,100 per voxel → WRONG DIRECTION
+**MI:** Learns that 40 ↔ 350 when aligned → CORRECT
+
+### Registration Setup
+
+```julia
+using MedicalImageRegistration
+
+# Create SyN registration with MI loss
+reg = SyNRegistration{Float32}(
+    is_3d = true,
+    loss_fn = mi_loss,              # Mutual Information
+    scales = (4, 2, 1),             # Multi-resolution: 8mm, 4mm, 2mm
+    iterations = (200, 100, 50),    # More iterations at coarse scales
+    learning_rate = 0.1,            # Displacement field learning rate
+    regularization = 0.5,           # Smoothness constraint
+    verbose = true
+)
+
+# Apply initial alignment
+moving_aligned = apply_initial_affine(moving_reg, initial_affine)
+
+# Create mask for FOV (weight = 0 outside overlap)
+mask = create_fov_mask(static_reg, overlap)
+
+# Register (returns displacement field)
+flow_xy, flow_yx = register(
+    reg,
+    moving_aligned,
+    static_reg;
+    mask = mask,                    # Only optimize in overlap region
+    return_flows = true             # Get displacement field
+)
+# flow_xy: displacement from static to moving coordinate
+# flow_yx: displacement from moving to static coordinate
+```
+
+### Output
+
+```julia
+# flow_xy is (3, 103, 103, 151) - displacement in mm at each grid point
+# Values represent: "to sample static at this location, go to moving[pos + flow]"
+```
+
+---
+
+## STEP 7: UPSAMPLE DISPLACEMENT FIELD
+
+### Why This Works
+
+Displacement fields are **spatially smooth** by construction:
+- SyN regularization enforces smoothness
+- Physical motion is continuous
+- Nearby points move similarly
+
+**Therefore bilinear interpolation is accurate for displacement.**
+
+### Implementation
+
+```julia
+function upsample_displacement(
+    displacement::AbstractArray{T, 4},  # (3, X_reg, Y_reg, Z_reg)
+    source_grid::RegistrationGrid{T},   # Registration grid (2mm)
+    target_size::NTuple{3, Int},         # Native moving size (512, 512, 750)
+    target_spacing::NTuple{3, T}         # Native moving spacing (0.4, 0.4, 0.5)
+) where T
+
+    output = similar(displacement, 3, target_size...)
+
+    AK.foreachindex(output) do idx
+        coord, i, j, k = linear_to_4d(idx, target_size)
+
+        # Physical position of target voxel (in mm)
+        phys = (
+            (i - 1) * target_spacing[1],
+            (j - 1) * target_spacing[2],
+            (k - 1) * target_spacing[3]
+        )
+
+        # Offset by target origin (assumed same as moving origin)
+        phys_global = phys .+ moving_origin
+
+        # Corresponding position in source (registration) grid
+        src_coord = (
+            (phys_global[1] - source_grid.origin[1]) / source_grid.spacing[1] + 1,
+            (phys_global[2] - source_grid.origin[2]) / source_grid.spacing[2] + 1,
+            (phys_global[3] - source_grid.origin[3]) / source_grid.spacing[3] + 1
+        )
+
+        # Trilinear interpolation of displacement vector
+        output[coord, i, j, k] = trilinear_sample(displacement, coord, src_coord...)
+    end
+
+    return output
+end
+```
+
+### Memory Consideration
+
+- Registration displacement: 103 × 103 × 151 × 3 × 4 bytes = 19 MB
+- Upsampled displacement: 512 × 512 × 750 × 3 × 4 bytes = 2.4 GB
+
+**Optimization:** Stream processing - don't store full upsampled field:
+
+```julia
+function apply_displacement_streamed(
+    moving::AbstractArray{T, 3},
+    displacement_reg::AbstractArray{T, 4},
+    source_grid::RegistrationGrid{T},
+    interpolation::Symbol
+) where T
+    output = similar(moving)
+
+    AK.foreachindex(output) do idx
+        i, j, k = linear_to_3d(idx, size(moving))
+
+        # Compute upsampled displacement on-the-fly
+        phys = voxel_to_physical_moving(i, j, k)
+        src_coord = physical_to_registration_grid(phys, source_grid)
+        disp = trilinear_sample(displacement_reg, src_coord...)
+
+        # Apply displacement
+        sample_pos = (phys[1] + disp[1], phys[2] + disp[2], phys[3] + disp[3])
+
+        # Convert back to voxel and sample
+        voxel = physical_to_voxel_moving(sample_pos)
+
+        if interpolation == :nearest
+            output[i, j, k] = nearest_sample(moving, voxel...)
+        else
+            output[i, j, k] = trilinear_sample(moving, voxel...)
+        end
+    end
+
+    return output
+end
+```
+
+---
+
+## STEP 8: APPLY TRANSFORM WITH NEAREST-NEIGHBOR
+
+### The Critical Step for HU Preservation
+
+```julia
+# Apply high-res displacement to ORIGINAL moving image
+output = spatial_transform(
+    moving.data,              # Original 0.5mm resolution, UNMODIFIED
+    displacement_highres,     # 512×512×750×3 (or compute on-the-fly)
+    interpolation = :nearest  # HU PRESERVATION
+)
+```
+
+### Why Nearest-Neighbor?
+
+**Bilinear interpolation at HU boundary:**
+```
+Input:  [0 HU]  [500 HU]
+                   ↑
+              Sample here (between voxels)
+
+Bilinear: 0.3 × 0 + 0.7 × 500 = 350 HU  ← NEW VALUE (didn't exist!)
+Nearest:  round → 500 HU                ← EXACT ORIGINAL VALUE
+```
+
+### Implementation
+
+```julia
+function nearest_sample(arr::AbstractArray{T, 3}, x, y, z) where T
+    # Round to nearest integer (1-indexed)
+    i = clamp(round(Int, x), 1, size(arr, 1))
+    j = clamp(round(Int, y), 1, size(arr, 2))
+    k = clamp(round(Int, z), 1, size(arr, 3))
+
+    return arr[i, j, k]
+end
+```
+
+---
+
+## STEP 9: VALIDATION
+
+### HU Preservation Check
+
+```julia
+function validate_hu_preservation(input::AbstractArray, output::AbstractArray)
+    input_values = Set(unique(input))
+    output_values = Set(unique(output))
+
+    # Output values must be subset of input values
+    if !issubset(output_values, input_values)
+        new_values = setdiff(output_values, input_values)
+        error("HU preservation failed! New values created: $(first(new_values, 10))")
+    end
+
+    # Check extrema preserved
+    @assert minimum(output) >= minimum(input) "Min HU changed!"
+    @assert maximum(output) <= maximum(input) "Max HU changed!"
+
+    println("✓ HU preservation validated")
+    println("  Input unique values: $(length(input_values))")
+    println("  Output unique values: $(length(output_values))")
+    println("  HU range: [$(minimum(output)), $(maximum(output))]")
+end
+```
+
+### Alignment Quality Check
+
+```julia
+function validate_alignment(registered, static, mask)
+    # Compute MI in overlap region
+    mi = mutual_information(registered[mask .> 0], static[mask .> 0])
+
+    # Compare to pre-registration
+    # (Higher MI = better alignment)
+
+    println("Mutual Information: $mi")
+
+    # Visual check: overlay
+    save_overlay_image("validation_overlay.png", registered, static)
+end
+```
+
+### Calcium-Specific Validation
+
+```julia
+function validate_calcium_registration(registered, static)
+    # Threshold both at 130 HU
+    calcium_registered = registered .> 130
+    calcium_static = static .> 130
+
+    # Dice coefficient for calcium overlap
+    dice = dice_score(calcium_registered, calcium_static)
+
+    println("Calcium Dice coefficient: $dice")
+
+    # Should be high (>0.7) for good registration
+    if dice < 0.5
+        @warn "Poor calcium alignment - registration may have failed"
+    end
+end
+```
+
+---
+
+## WHAT IF USER WANTS REVERSE DIRECTION?
+
+### Scenario: Register static to moving
+
+Sometimes the user wants the non-contrast image registered to the contrast image:
+- Visualize non-contrast anatomy on contrast CTA
+- Use CTA segmentation on non-contrast image
+
+### Solution: Use inverse displacement field
+
+```julia
+# SyN returns both directions:
+flow_xy, flow_yx = register(reg, moving, static; return_flows=true)
+
+# flow_xy: moving → static (what we used above)
+# flow_yx: static → moving (inverse direction)
+
+# To register static to moving:
+static_to_moving = spatial_transform(
+    static.data,
+    flow_yx,                    # Inverse flow
+    interpolation = :nearest    # Still preserve HU!
+)
+```
+
+### Important: Target Resolution
+
+```julia
+# If registering static (3mm) to moving (0.5mm):
+# Option A: Output at 3mm (fast, same as input)
+# Option B: Output at 0.5mm (upsampled, no new information but aligned grid)
+
+# For analysis with contrast CTA, usually want Option B:
+static_aligned_highres = resample_then_apply(
+    static.data,
+    static.spacing,
+    moving.spacing,     # Target 0.5mm
+    flow_yx,
+    interpolation = :nearest
+)
+```
+
+---
+
+## PROPOSED NEW TYPES AND FUNCTIONS
+
+### Core Types
+
+```julia
+#######################################
+# PhysicalImage: Image with spatial info
+#######################################
+struct PhysicalImage{T, N, A<:AbstractArray{T,N}}
+    data::A
+    spacing::NTuple{N, T}           # Voxel spacing in mm
+    origin::NTuple{N, T}            # Physical position of voxel [1,1,1]
+    direction::NTuple{N, NTuple{N, T}}  # Direction cosines
+end
+
+# Convenience constructors
+PhysicalImage(data, spacing) = PhysicalImage(data, spacing, ntuple(_->zero(eltype(spacing)), ndims(data)), identity_direction(ndims(data)))
+
+# Coordinate conversion
+voxel_to_physical(img::PhysicalImage, idx...) = img.origin .+ (idx .- 1) .* img.spacing
+physical_to_voxel(img::PhysicalImage, pos...) = (pos .- img.origin) ./ img.spacing .+ 1
+
+# GPU transfer
+import Metal: MtlArray
+MtlArray(img::PhysicalImage) = PhysicalImage(MtlArray(img.data), img.spacing, img.origin, img.direction)
+Array(img::PhysicalImage{T,N,<:MtlArray}) where {T,N} = PhysicalImage(Array(img.data), img.spacing, img.origin, img.direction)
+
+#######################################
+# RegistrationWorkspace: Holds working data
+#######################################
+struct RegistrationWorkspace{T}
+    static::PhysicalImage{T, 3}      # Original static (reference)
+    moving::PhysicalImage{T, 3}      # Original moving
+    static_reg::Array{T, 3}          # Resampled static for registration
+    moving_reg::Array{T, 3}          # Resampled moving for registration
+    grid::RegistrationGrid{T}        # Registration grid info
+    overlap::PhysicalExtent{T}       # FOV overlap
+    mask::Array{T, 3}                # Validity mask
+end
+
+#######################################
+# DisplacementField: Physical displacement
+#######################################
+struct DisplacementField{T, A<:AbstractArray{T,4}}
+    data::A                          # (3, X, Y, Z) displacement in mm
+    grid::RegistrationGrid{T}        # Grid on which displacement is defined
+end
+```
+
+### New Functions
+
+```julia
+#######################################
+# DICOM/NIfTI Loading
+#######################################
+load_dicom_series(folder::String) -> PhysicalImage
+load_nifti(file::String) -> PhysicalImage
+save_nifti(file::String, img::PhysicalImage)
+
+#######################################
+# Resampling
+#######################################
+resample(img::PhysicalImage, target_spacing; interpolation=:trilinear) -> PhysicalImage
+resample_to_reference(moving::PhysicalImage, static::PhysicalImage) -> PhysicalImage
+
+#######################################
+# FOV/Overlap
+#######################################
+compute_extent(img::PhysicalImage) -> PhysicalExtent
+compute_overlap(img1::PhysicalImage, img2::PhysicalImage) -> PhysicalExtent
+create_fov_mask(img::PhysicalImage, overlap::PhysicalExtent) -> Array
+
+#######################################
+# Registration Grid
+#######################################
+create_registration_grid(overlap, spacing) -> RegistrationGrid
+prepare_registration_workspace(static, moving; spacing) -> RegistrationWorkspace
+
+#######################################
+# Displacement Field Operations
+#######################################
+upsample_displacement(field::DisplacementField, target_spacing, target_size) -> DisplacementField
+invert_displacement(field::DisplacementField) -> DisplacementField  # Approximate
+compose_displacements(field1, field2) -> DisplacementField
+
+#######################################
+# Transform Application
+#######################################
+apply_displacement(img::PhysicalImage, field::DisplacementField; interpolation=:nearest) -> PhysicalImage
+```
+
+### Changes to Existing Functions
+
+```julia
+#######################################
+# Modified register() signature
+#######################################
+
+# Current (array-only):
+register(reg, moving::AbstractArray, static::AbstractArray)
+
+# Proposed (supports PhysicalImage):
+function register(
+    reg::AbstractRegistration,
+    moving::Union{AbstractArray, PhysicalImage},
+    static::Union{AbstractArray, PhysicalImage};
+    # New kwargs:
+    registration_spacing::Union{Nothing, NTuple{3}} = nothing,
+    mask::Union{Nothing, AbstractArray} = nothing,
+    final_interpolation::Symbol = :bilinear,  # or :nearest
+    return_displacement::Bool = false,
+    preserve_hu::Bool = false  # Shortcut for nearest + validation
+)
+
+# When PhysicalImage inputs:
+# - Automatically handles coordinate conversion
+# - Creates registration grid at specified spacing
+# - Returns PhysicalImage output with correct metadata
+```
+
+### High-Level API
+
+```julia
+#######################################
+# register_clinical: One-function solution
+#######################################
+function register_clinical(
+    moving_path::String,    # DICOM folder or NIfTI file
+    static_path::String;    # DICOM folder or NIfTI file
+    registration_spacing::NTuple{3} = (2.0, 2.0, 2.0),
+    loss_fn = mi_loss,
+    scales = (4, 2, 1),
+    iterations = (200, 100, 50),
+    preserve_hu::Bool = true,
+    verbose::Bool = true,
+    gpu::Bool = true
+) -> PhysicalImage
+
+# Usage:
+registered = register_clinical(
+    "path/to/moving/dicom/",
+    "path/to/static/dicom/";
+    preserve_hu = true
+)
+```
+
+---
+
+## IMPLEMENTATION ROADMAP
+
+### Phase 1: Foundation (MUST-HAVE)
+
+| Story ID | Title | Complexity | Priority | Dependencies |
+|----------|-------|------------|----------|--------------|
+| IMPL-PHYSICAL-001 | PhysicalImage type | S | 1 | None |
+| IMPL-EXTENT-001 | Physical extent and overlap | S | 2 | IMPL-PHYSICAL-001 |
+| IMPL-RESAMPLE-001 | Spacing-aware resampling | M | 3 | IMPL-PHYSICAL-001 |
+| IMPL-MI-001 | Mutual Information loss | L | 4 | RESEARCH-MI-001 |
+| IMPL-DISP-UPSAMPLE-001 | Displacement field upsampling | M | 5 | None |
+
+**Phase 1 enables:** Basic physical coordinate registration with MI loss
+
+### Phase 2: Clinical Workflow (SHOULD-HAVE)
+
+| Story ID | Title | Complexity | Priority | Dependencies |
+|----------|-------|------------|----------|--------------|
+| IMPL-DICOM-001 | DICOM loading (DICOM.jl) | M | 6 | IMPL-PHYSICAL-001 |
+| IMPL-NIFTI-001 | NIfTI loading (NIfTI.jl) | S | 7 | IMPL-PHYSICAL-001 |
+| IMPL-MASK-001 | FOV mask registration | S | 8 | IMPL-EXTENT-001 |
+| IMPL-WORKSPACE-001 | RegistrationWorkspace | M | 9 | All Phase 1 |
+
+**Phase 2 enables:** Load DICOM, automatic FOV handling
+
+### Phase 3: High-Level API (NICE-TO-HAVE)
+
+| Story ID | Title | Complexity | Priority | Dependencies |
+|----------|-------|------------|----------|--------------|
+| IMPL-CLINICAL-API-001 | register_clinical() function | M | 10 | All Phase 2 |
+| IMPL-VALIDATION-001 | HU preservation validation | S | 11 | None |
+| IMPL-INVERSE-001 | Inverse displacement | M | 12 | IMPL-DISP-UPSAMPLE-001 |
+
+**Phase 3 enables:** One-line clinical registration
+
+### Complexity Estimates
+
+- **S (Small):** 1-2 days, < 200 lines
+- **M (Medium):** 3-5 days, 200-500 lines
+- **L (Large):** 1-2 weeks, 500+ lines
+
+### Total Estimated Effort
+
+| Phase | Stories | Estimated Time |
+|-------|---------|----------------|
+| Phase 1 | 5 | 3-4 weeks |
+| Phase 2 | 4 | 2-3 weeks |
+| Phase 3 | 3 | 1-2 weeks |
+| **Total** | **12** | **6-9 weeks** |
+
+---
+
+## MUST-HAVE VS NICE-TO-HAVE
+
+### MUST-HAVE for Cardiac CT Use Case
+
+| Feature | Why Essential |
+|---------|---------------|
+| **PhysicalImage type** | Foundation for everything |
+| **Spacing-aware grid** | 3mm vs 0.5mm requires physical coords |
+| **MI loss** | Contrast vs non-contrast requires MI |
+| **Displacement upsampling** | Register at 2mm, apply at 0.5mm |
+| **Nearest-neighbor final** | HU preservation is mandatory |
+| **FOV overlap detection** | Tight FOV must be handled |
+
+### NICE-TO-HAVE
+
+| Feature | Why Nice |
+|---------|----------|
+| DICOM loading | User can use DICOM.jl directly |
+| NIfTI loading | Alternative format |
+| register_clinical() | Convenience, can do manually |
+| Inverse displacement | Not needed for forward registration |
+| Automatic validation | User can check manually |
+
+### Minimum Viable Product (MVP)
+
+For the cardiac CT use case to work, we need:
+
+1. ✅ PhysicalImage struct
+2. ✅ Physical coordinate conversion
+3. ✅ Spacing-aware resample
+4. ✅ MI loss (differentiable)
+5. ✅ Modified register() to accept PhysicalImage
+6. ✅ Displacement field upsampling
+7. ✅ Apply with nearest-neighbor
+
+**MVP allows:** Load arrays + spacing manually, register, get HU-preserved result.
+
+---
+
+## SUMMARY
+
+### Key Decisions
+
+1. **Registration resolution:** 2mm isotropic (balance of speed/accuracy)
+2. **Loss function:** Mutual Information (handles contrast)
+3. **Final interpolation:** Nearest-neighbor (HU preservation)
+4. **Transform handling:** Upsample displacement, not images
+5. **Architecture:** PhysicalImage type wrapping arrays
+
+### The Complete Picture
+
+```
+          INPUT                        PROCESS                     OUTPUT
+    ┌─────────────────┐
+    │ DICOM Folder 1  │──────┐
+    │ (3mm, no cont.) │      │      ┌──────────────────┐
+    └─────────────────┘      ├─────→│  MedicalImage    │
+                             │      │  Registration.jl │
+    ┌─────────────────┐      │      │                  │        ┌─────────────────┐
+    │ DICOM Folder 2  │──────┘      │  - Load DICOM    │        │ Registered      │
+    │ (0.5mm, contr.) │             │  - FOV overlap   │───────→│ PhysicalImage   │
+    └─────────────────┘             │  - MI + SyN      │        │ (HU preserved)  │
+                                    │  - Nearest final │        └─────────────────┘
+                                    └──────────────────┘
+```
+
+### Next Steps
+
+This research phase is complete. Implementation should proceed in the order specified in the roadmap, starting with **IMPL-PHYSICAL-001: PhysicalImage type**.
+
+---
