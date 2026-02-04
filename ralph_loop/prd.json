@@ -197,7 +197,7 @@
       "id": "DEMO-001",
       "type": "IMPL",
       "title": "Demo with TestImages.jl on GPU",
-      "status": "open",
+      "status": "done",
       "priority": 11,
       "blockedBy": ["SETUP-CI-001"],
       "description": "Create demo that runs registration on GPU with TestImages.jl.",

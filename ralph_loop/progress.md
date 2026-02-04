@@ -1037,3 +1037,73 @@ All tests pass with conditional GPU test execution.
 - ✓ CI passes (tests handle missing GPU gracefully)
 
 ---
+
+### [DEMO-001] Demo with TestImages.jl on GPU
+
+**Status:** DONE
+**Date:** 2026-02-03
+
+#### Implementation Summary
+
+Created a complete demo script that showcases image registration using the package. The demo automatically detects and uses Metal GPU (Apple Silicon) when available, falling back to CPU otherwise.
+
+#### Key Files
+- `examples/demo.jl` - Main demo script (~230 lines)
+- `examples/output/` - Generated output images and GIF
+- `README.md` - Updated with correct API examples and GPU instructions
+
+#### Features Implemented
+
+**Demo Script (`examples/demo.jl`):**
+- Automatic Metal GPU detection with CPU fallback
+- Loads cameraman test image from TestImages.jl
+- Creates synthetically misaligned version (translation, rotation, zoom)
+- Runs multi-resolution affine registration
+- Generates animated GIF showing registration process
+- Saves before/after images and checkerboard overlays
+
+**Output Files:**
+- `static.png` - Target/reference image
+- `moving_before.png` - Misaligned moving image
+- `moving_after.png` - Registered result
+- `overlay_before.png` - Checkerboard overlay before registration
+- `overlay_after.png` - Checkerboard overlay after registration
+- `registration_demo.gif` - Animated GIF showing full process
+
+**GPU Support:**
+- Detects Metal.functional() at startup
+- Creates MtlArray images when GPU available
+- Uses `array_type=MtlArray` for AffineRegistration
+- Handles GPU→CPU conversion for visualization
+
+**README Updates:**
+- Fixed Quick Start API examples to match actual implementation
+- Updated constructor syntax: `AffineRegistration{Float32}(is_3d=true, ...)`
+- Fixed function call order: `register(reg, moving, static)`
+- Added GPU acceleration note to demo section
+
+#### Test Results
+
+Demo runs successfully on Metal GPU:
+```
+Metal GPU detected - running on GPU
+Array shape: (512, 512, 1, 1) (X, Y, C, N) on GPU (MtlArray)
+
+Scale 1/3: scale=4, shape=(128, 128), iters=100
+  Iter 100/100: loss = 0.001976
+Scale 2/3: scale=2, shape=(256, 256), iters=50
+  Iter 50/50: loss = 0.000662
+Scale 3/3: scale=1, shape=(512, 512), iters=25
+  Iter 25/25: loss = 0.000494
+
+Learned affine matrix:
+  1.04865    0.0917611  -0.0712021
+ -0.0828862  0.948725    0.117625
+```
+
+#### Acceptance Criteria Status
+- ✓ examples/demo.jl runs on GPU (Metal GPU detected and used)
+- ✓ Produces GIF showing registration (registration_demo.gif created)
+- ✓ README updated (API examples fixed, GPU instructions added)
+
+---
