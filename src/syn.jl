@@ -51,7 +51,7 @@ end
 # ============================================================================
 
 """
-    spatial_transform(x::AbstractArray{T,5}, v::AbstractArray{T,5}; align_corners=true, padding_mode=:border) where T
+    spatial_transform(x::AbstractArray{T,5}, v::AbstractArray{T,5}; align_corners=true, padding_mode=:border, interpolation=:bilinear) where T
 
 Warp image x using displacement field v.
 The output at position p is sampled from input at position (p + v[p]).
@@ -61,6 +61,7 @@ The output at position p is sampled from input at position (p + v[p]).
 - `v`: Displacement field of shape (X, Y, Z, D, N) where D=3
 - `align_corners`: Grid sampling alignment
 - `padding_mode`: Padding mode for out-of-bounds (:zeros, :border)
+- `interpolation`: Interpolation mode (:bilinear/:trilinear default, :nearest for HU preservation)
 
 # Returns
 - Warped image of same shape as x
@@ -69,7 +70,8 @@ function spatial_transform(
     x::AbstractArray{T,5},
     v::AbstractArray{T,5};
     align_corners::Bool=true,
-    padding_mode::Symbol=:border
+    padding_mode::Symbol=:border,
+    interpolation::Symbol=:bilinear
 ) where T
     X, Y, Z, C, N = size(x)
     X_v, Y_v, Z_v, D, N_v = size(v)
@@ -94,7 +96,7 @@ function spatial_transform(
     _add_displacement_to_grid!(grid, id_grid, v_perm)
 
     # Use grid_sample with the combined grid
-    return grid_sample(x, grid; padding_mode=padding_mode, align_corners=align_corners)
+    return grid_sample(x, grid; padding_mode=padding_mode, align_corners=align_corners, interpolation=interpolation)
 end
 
 """
@@ -1048,17 +1050,21 @@ function _init_velocity_fields!(
 end
 
 """
-    apply_flows(reg, x, y, v_xy, v_yx)
+    apply_flows(reg, x, y, v_xy, v_yx; interpolation=:bilinear)
 
 Apply forward and inverse flows to compute warped images and full flows.
 Returns (images, flows) dictionaries.
+
+# Arguments
+- `interpolation`: Interpolation mode for final warped images (:bilinear default, :nearest for HU preservation)
 """
 function apply_flows(
     reg::SyNRegistration{T},
     x::AbstractArray{T,5},  # Moving
     y::AbstractArray{T,5},  # Static
     v_xy::AbstractArray{T,5},
-    v_yx::AbstractArray{T,5}
+    v_yx::AbstractArray{T,5};
+    interpolation::Symbol=:bilinear
 ) where T
     # Compute half flows via diffeomorphic transform
     # Stack all 4 velocity fields for efficient processing
@@ -1074,9 +1080,9 @@ function apply_flows(
     flow_xy_inv_half = half_flows[:, :, :, :, 2N+1:3N]
     flow_yx_inv_half = half_flows[:, :, :, :, 3N+1:4N]
 
-    # Half-way images
-    xy_half = spatial_transform(x, flow_xy_half; align_corners=reg.align_corners, padding_mode=reg.padding_mode)
-    yx_half = spatial_transform(y, flow_yx_half; align_corners=reg.align_corners, padding_mode=reg.padding_mode)
+    # Half-way images (always use bilinear for intermediate computations)
+    xy_half = spatial_transform(x, flow_xy_half; align_corners=reg.align_corners, padding_mode=reg.padding_mode, interpolation=:bilinear)
+    yx_half = spatial_transform(y, flow_yx_half; align_corners=reg.align_corners, padding_mode=reg.padding_mode, interpolation=:bilinear)
 
     # Full flows via composition
     # full_xy = compose(half_xy, -half_yx)
@@ -1087,9 +1093,9 @@ function apply_flows(
                                           align_corners=reg.align_corners,
                                           padding_mode=reg.padding_mode)
 
-    # Full warped images
-    xy_full = spatial_transform(x, flow_xy_full; align_corners=reg.align_corners, padding_mode=reg.padding_mode)
-    yx_full = spatial_transform(y, flow_yx_full; align_corners=reg.align_corners, padding_mode=reg.padding_mode)
+    # Full warped images (use specified interpolation mode)
+    xy_full = spatial_transform(x, flow_xy_full; align_corners=reg.align_corners, padding_mode=reg.padding_mode, interpolation=interpolation)
+    yx_full = spatial_transform(y, flow_yx_full; align_corners=reg.align_corners, padding_mode=reg.padding_mode, interpolation=interpolation)
 
     images = Dict(
         :xy_half => xy_half, :yx_half => yx_half,
@@ -1335,6 +1341,12 @@ end
 
 Register moving image to static image using SyN diffeomorphic registration.
 
+# Keyword Arguments
+- `loss_fn`: Loss function (default: mse_loss)
+- `reset_params`: Reset parameters before fitting (default: true)
+- `final_interpolation`: Interpolation mode for final output (:bilinear default, :nearest for HU preservation).
+  During optimization, trilinear is always used for smooth gradients.
+
 # Returns
 - (moved_xy, moved_yx, flow_xy, flow_yx): Forward and inverse moved images and flow fields
 """
@@ -1343,34 +1355,37 @@ function register(
     moving::AbstractArray{T,5},
     static::AbstractArray{T,5};
     loss_fn::Function=mse_loss,
-    reset_params::Bool=true
+    reset_params::Bool=true,
+    final_interpolation::Symbol=:bilinear
 ) where T
     if reset_params
         reset!(reg)
     end
 
-    # Fit parameters
+    # Fit parameters (always uses trilinear for smooth gradients)
     fit!(reg, moving, static; loss_fn=loss_fn)
 
-    # Apply final transformation
-    images, flows = apply_flows(reg, moving, static, reg.v_xy, reg.v_yx)
+    # Apply final transformation with specified interpolation mode
+    images, flows = apply_flows(reg, moving, static, reg.v_xy, reg.v_yx; interpolation=final_interpolation)
 
     return images[:xy_full], images[:yx_full], flows[:xy_full], flows[:yx_full]
 end
 
 """
-    transform(reg::SyNRegistration, image; direction=:forward)
+    transform(reg::SyNRegistration, image; direction=:forward, interpolation=:bilinear)
 
 Transform an image using the current registration parameters.
 
 # Arguments
 - `image`: Image to transform (X, Y, Z, C, N)
 - `direction`: :forward (moving→static) or :inverse (static→moving)
+- `interpolation`: Interpolation mode (:bilinear/:trilinear default, :nearest for HU preservation)
 """
 function transform(
     reg::SyNRegistration{T},
     image::AbstractArray{T,5};
-    direction::Symbol=:forward
+    direction::Symbol=:forward,
+    interpolation::Symbol=:bilinear
 ) where T
     @assert reg.v_xy !== nothing "Must fit registration first"
 
@@ -1381,5 +1396,5 @@ function transform(
                                     align_corners=reg.align_corners,
                                     padding_mode=reg.padding_mode)
 
-    return spatial_transform(image, flow; align_corners=reg.align_corners, padding_mode=reg.padding_mode)
+    return spatial_transform(image, flow; align_corners=reg.align_corners, padding_mode=reg.padding_mode, interpolation=interpolation)
 end

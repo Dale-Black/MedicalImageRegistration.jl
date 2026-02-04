@@ -137,36 +137,50 @@ moved = register(reg, moving, static)
 
 ## Intensity Conservation (HU Values)
 
-When registering CT images, **intensity (Hounsfield Unit) conservation is not guaranteed** by interpolation-based registration.
+When registering CT images, **intensity (Hounsfield Unit) conservation is not guaranteed** by default interpolation.
 
 ### Why HU Values Change
 
-Image registration uses interpolation (bilinear/trilinear) to resample the moving image to match the static image. Interpolation creates new pixel values by averaging nearby pixels, which can:
+Image registration uses interpolation (bilinear/trilinear) to resample the moving image. Interpolation creates new pixel values by averaging nearby pixels, which can:
 
 1. **Smooth edges**: Sharp boundaries between tissues become blurred
 2. **Shift mean values**: Average HU in a region may change slightly
 3. **Introduce new values**: Interpolated values may not exist in the original image
 
-### Recommendations for CT Images
+### HU-Preserving Mode (Nearest-Neighbor)
 
-| Use Case | Recommendation |
-|----------|---------------|
-| **Visual alignment** | Use directly - interpolation effects are minimal |
-| **Quantitative analysis** | Apply transform to ROI masks, then sample original image |
-| **Dose calculation** | Use nearest-neighbor interpolation or apply transform to contours |
-| **Segmentation transfer** | Transform binary masks, then threshold at 0.5 |
+This package supports **hybrid interpolation mode** for HU preservation:
 
-### Example: Preserving Original Intensities
+- **During optimization**: Bilinear/trilinear interpolation for smooth gradients
+- **Final output**: Nearest-neighbor interpolation to preserve exact input values
 
 ```julia
-# Register images
+# Register with HU preservation
 reg = AffineRegistration{Float32}(is_3d=true)
-moved = register(reg, moving_ct, static_ct)
+moved = register(reg, moving_ct, static_ct; final_interpolation=:nearest)
 
-# For quantitative analysis: transform a mask, then sample original
-mask_moved = transform(reg, mask)
-original_values = moving_ct[mask_moved .> 0.5]  # Sample original at new locations
+# Output values are EXACT subset of input values (HU preserved)
+@assert issubset(Set(moved), Set(moving_ct))  # True!
+
+# Or use transform() with interpolation kwarg
+moved_nearest = transform(reg, moving_ct; interpolation=:nearest)
 ```
+
+### Recommendations for CT Images
+
+| Use Case | Interpolation Mode | Code |
+|----------|-------------------|------|
+| **Visual alignment** | `:bilinear` (default) | `register(reg, moving, static)` |
+| **Quantitative analysis** | `:nearest` | `register(reg, moving, static; final_interpolation=:nearest)` |
+| **Dose calculation** | `:nearest` | `transform(reg, ct; interpolation=:nearest)` |
+| **Segmentation transfer** | `:bilinear` + threshold | `transform(reg, mask) .> 0.5` |
+
+### How Hybrid Mode Works
+
+1. **Optimization phase**: Uses smooth bilinear/trilinear interpolation for gradient-based optimization
+2. **Final output**: Applies the learned transformation with nearest-neighbor to preserve exact values
+
+This ensures the registration converges properly (smooth gradients) while the final result preserves exact intensity values (no interpolation artifacts).
 
 ## Array Conventions
 
@@ -215,14 +229,14 @@ SyNRegistration{T}(;
 
 ```julia
 # Registration
-register(reg, moving, static; loss_fn=mse_loss, verbose=true)
+register(reg, moving, static; loss_fn=mse_loss, verbose=true, final_interpolation=:bilinear)
 fit!(reg, moving, static; loss_fn=mse_loss, verbose=true)
-transform(reg, image; direction=:forward)  # Apply learned transform
+transform(reg, image; direction=:forward, interpolation=:bilinear)  # Apply learned transform
 reset!(reg)  # Reset parameters to identity
 
 # Affine-specific
 get_affine(reg)  # Get current affine matrix
-affine_transform(image, theta)  # Apply explicit affine matrix
+affine_transform(image, theta; interpolation=:bilinear)  # Apply explicit affine matrix
 compose_affine(translation, rotation, zoom, shear)  # Build affine matrix
 affine_grid(theta, size)  # Generate sampling grid from affine
 
@@ -233,9 +247,13 @@ dice_score(pred, target) # Dice coefficient
 ncc_loss(pred, target; kernel_size=9)  # Normalized Cross Correlation
 
 # Low-level Operations
-grid_sample(input, grid; padding_mode=:zeros, align_corners=true)
-spatial_transform(image, displacement)  # Warp with displacement field
+grid_sample(input, grid; padding_mode=:zeros, align_corners=true, interpolation=:bilinear)
+spatial_transform(image, displacement; interpolation=:bilinear)  # Warp with displacement field
 diffeomorphic_transform(velocity; time_steps=7)  # Scaling-and-squaring
+
+# Interpolation Modes
+# :bilinear/:trilinear - Smooth gradients, creates new values (default)
+# :nearest - HU-preserving, returns exact input values, zero gradients
 ```
 
 ## Dependencies

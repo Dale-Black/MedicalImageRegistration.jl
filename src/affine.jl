@@ -120,7 +120,7 @@ end
 # ============================================================================
 
 """
-    affine_transform(image, theta; shape=nothing, padding_mode=:border, align_corners=true)
+    affine_transform(image, theta; shape=nothing, padding_mode=:border, align_corners=true, interpolation=:bilinear)
 
 Apply an affine transformation to an image.
 
@@ -130,6 +130,7 @@ Apply an affine transformation to an image.
 - `shape`: Optional output spatial shape. If nothing, uses input shape.
 - `padding_mode`: :zeros or :border
 - `align_corners`: Align corners for grid sampling
+- `interpolation`: Interpolation mode (:bilinear/:trilinear default, :nearest for HU preservation)
 
 # Returns
 - Transformed image
@@ -139,13 +140,14 @@ function affine_transform(
     theta::AbstractArray{T,3};
     shape::Union{Nothing, NTuple{2,Int}}=nothing,
     padding_mode::Symbol=:border,
-    align_corners::Bool=true
+    align_corners::Bool=true,
+    interpolation::Symbol=:bilinear
 ) where T
     X_in, Y_in, C, N = size(image)
     out_shape = shape === nothing ? (X_in, Y_in) : shape
 
     grid = affine_grid(theta, out_shape; align_corners=align_corners)
-    return grid_sample(image, grid; padding_mode=padding_mode, align_corners=align_corners)
+    return grid_sample(image, grid; padding_mode=padding_mode, align_corners=align_corners, interpolation=interpolation)
 end
 
 function affine_transform(
@@ -153,13 +155,14 @@ function affine_transform(
     theta::AbstractArray{T,3};
     shape::Union{Nothing, NTuple{3,Int}}=nothing,
     padding_mode::Symbol=:border,
-    align_corners::Bool=true
+    align_corners::Bool=true,
+    interpolation::Symbol=:bilinear
 ) where T
     X_in, Y_in, Z_in, C, N = size(image)
     out_shape = shape === nothing ? (X_in, Y_in, Z_in) : shape
 
     grid = affine_grid(theta, out_shape; align_corners=align_corners)
-    return grid_sample(image, grid; padding_mode=padding_mode, align_corners=align_corners)
+    return grid_sample(image, grid; padding_mode=padding_mode, align_corners=align_corners, interpolation=interpolation)
 end
 
 # ============================================================================
@@ -527,6 +530,8 @@ Register `moving` image to `static` image and return the transformed moving imag
 - `loss_fn`: Loss function (default: mse_loss)
 - `verbose`: Print progress (default: true)
 - `reset_params`: Reset parameters before fitting (default: true)
+- `final_interpolation`: Interpolation mode for final output (:bilinear default, :nearest for HU preservation).
+  During optimization, bilinear/trilinear is always used for smooth gradients.
 
 # Returns
 - Transformed moving image aligned to static
@@ -537,27 +542,28 @@ function register(
     static::AbstractArray{T};
     loss_fn::Function=mse_loss,
     verbose::Bool=true,
-    reset_params::Bool=true
+    reset_params::Bool=true,
+    final_interpolation::Symbol=:bilinear
 ) where T
     if reset_params
         reset!(reg)
     end
 
-    # Fit parameters
+    # Fit parameters (always uses bilinear for smooth gradients)
     fit!(reg, moving, static; loss_fn=loss_fn, verbose=verbose)
 
-    # Transform moving image to static size
+    # Transform moving image to static size (use specified interpolation)
     if reg.is_3d
         out_shape = (size(static, 1), size(static, 2), size(static, 3))
     else
         out_shape = (size(static, 1), size(static, 2))
     end
 
-    return transform(reg, moving, out_shape)
+    return transform(reg, moving, out_shape; interpolation=final_interpolation)
 end
 
 """
-    transform(reg::AffineRegistration, image, shape=nothing)
+    transform(reg::AffineRegistration, image, shape=nothing; interpolation=:bilinear)
 
 Transform an image using the current registration parameters.
 
@@ -565,6 +571,7 @@ Transform an image using the current registration parameters.
 - `reg`: AffineRegistration model with fitted parameters
 - `image`: Image to transform
 - `shape`: Optional output spatial shape. If nothing, uses input shape.
+- `interpolation`: Interpolation mode (:bilinear/:trilinear default, :nearest for HU preservation)
 
 # Returns
 - Transformed image
@@ -572,15 +579,16 @@ Transform an image using the current registration parameters.
 function transform(
     reg::AffineRegistration{T},
     image::AbstractArray{T},
-    shape::Union{Nothing, Tuple}=nothing
+    shape::Union{Nothing, Tuple}=nothing;
+    interpolation::Symbol=:bilinear
 ) where T
     theta = get_affine(reg)
 
     if reg.is_3d
         out_shape = shape === nothing ? (size(image, 1), size(image, 2), size(image, 3)) : shape
-        return affine_transform(image, theta; shape=out_shape, padding_mode=reg.padding_mode, align_corners=reg.align_corners)
+        return affine_transform(image, theta; shape=out_shape, padding_mode=reg.padding_mode, align_corners=reg.align_corners, interpolation=interpolation)
     else
         out_shape = shape === nothing ? (size(image, 1), size(image, 2)) : shape
-        return affine_transform(image, theta; shape=out_shape, padding_mode=reg.padding_mode, align_corners=reg.align_corners)
+        return affine_transform(image, theta; shape=out_shape, padding_mode=reg.padding_mode, align_corners=reg.align_corners, interpolation=interpolation)
     end
 end
