@@ -729,7 +729,7 @@
       "id": "RESEARCH-HYBRID-ANTS-001",
       "type": "RESEARCH",
       "title": "Research hybrid approach: ANTs preprocessing + our GPU registration",
-      "status": "pending",
+      "status": "done",
       "priority": 32,
       "blockedBy": ["FIX-NOTEBOOK-001"],
       "description": "After fixing basic preprocessing, research if we should use ANTs (via ANTsPy or shell) for preprocessing and our library for GPU-accelerated registration. ANTs has 20+ years of robust preprocessing. We have fast GPU registration. Could be best of both worlds. Research the interface.",
@@ -749,6 +749,7 @@
         "**UPDATE prd.json**: Add or modify stories based on decision",
         "NO CODE - research and decision document only, but MUST update prd.json with next steps"
       ],
+      "decision": "DO NOT integrate ANTs for CT preprocessing. N4 bias correction is for MRI, not CT. Our pure Julia preprocessing (COM alignment, FOV overlap, HU windowing) is sufficient for CT registration. For future MRI support, consider optional ANTsPy extension package.",
       "files": ["ralph_loop/progress.md", "ralph_loop/prd.json"]
     }
   ]

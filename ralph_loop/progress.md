@@ -7140,3 +7140,121 @@ registration_result = MIR.register_clinical(
 The notebook cannot be directly tested without the DICOM data files that are not in the repository. The changes follow the same patterns as the working tests in test_clinical.jl.
 
 ---
+
+## [RESEARCH-HYBRID-ANTS-001] Research hybrid approach: ANTs preprocessing + our GPU registration
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+### Research Question
+
+Should we use ANTs (via ANTsPy or shell) for preprocessing and our library for GPU-accelerated registration? ANTs has 20+ years of robust preprocessing. We have fast GPU registration. Could be best of both worlds?
+
+### Key Finding: CT Does NOT Need N4 Bias Field Correction
+
+**Critical Discovery:** The primary advanced preprocessing technique ANTs is famous for (N4 bias field correction) is **NOT NEEDED for CT images**.
+
+From medical imaging literature:
+- N4 bias field correction is designed for **MRI** images
+- MRI scans have inherent intensity inhomogeneities (bias field) due to RF coil sensitivity patterns
+- **CT scans do NOT have bias field artifacts** - the physics of X-ray attenuation is fundamentally different
+- Attempting bias field correction on CT may actually **reduce contrast** between areas of interest
+
+### ANTs Preprocessing: What's Hard to Replicate vs What We Already Have
+
+| Feature | ANTs | Our Library | Notes |
+|---------|------|-------------|-------|
+| N4 Bias Correction | ✅ Excellent | ❌ Not needed | **Only for MRI** - CT doesn't have bias field |
+| Histogram Matching | ✅ ITK filter | ⚠️ Not implemented | Not recommended for CT; can hurt inter-modal registration |
+| Resampling | ✅ Multiple methods | ✅ GPU-accelerated | We have this |
+| COM Alignment | ✅ Available | ✅ GPU-accelerated | We have this |
+| FOV Overlap | ⚠️ Manual | ✅ GPU-accelerated | We have this |
+| HU Windowing | ⚠️ Manual | ✅ GPU-accelerated | We have this |
+| Denoising | ✅ Multiple methods | ❌ Not implemented | Could add if needed |
+| Brain Extraction | ✅ Excellent | ❌ Not implemented | Brain-specific - not for cardiac CT |
+
+### ANTsPy + Julia Integration Options
+
+**Option 1: PythonCall.jl**
+```julia
+using PythonCall
+ants = pyimport("ants")
+image = ants.image_read("scan.nii.gz")
+corrected = ants.n4_bias_field_correction(image)
+```
+
+**Option 2: Shell out to ANTs CLI**
+```julia
+run(`N4BiasFieldCorrection -i input.nii.gz -o output.nii.gz`)
+```
+
+Both are possible but add complexity:
+- Python dependency management (conda environments)
+- File I/O overhead (save/load NIfTI)
+- Installation requirements for users
+- Potential version compatibility issues
+
+### Evaluation: Is Hybrid Approach Worth It?
+
+**For CT Registration (our primary use case):**
+
+| Factor | Pure Julia | Hybrid ANTs | Winner |
+|--------|------------|-------------|--------|
+| Bias correction | Not needed | N4 available (not needed) | **Tie** |
+| COM alignment | ✅ Have it | ✅ Have it | **Tie** |
+| FOV handling | ✅ Have it | ✅ Have it | **Tie** |
+| HU windowing | ✅ Have it | Manual | **Julia** |
+| Installation | Julia only | Julia + Python + ANTs | **Julia** |
+| GPU acceleration | ✅ Full pipeline | ❌ CPU preprocessing | **Julia** |
+| Dependencies | Minimal | Complex | **Julia** |
+| User experience | Simple | Complex setup | **Julia** |
+
+**For MRI Registration (future potential):**
+
+| Factor | Pure Julia | Hybrid ANTs | Winner |
+|--------|------------|-------------|--------|
+| Bias correction | Would need to implement | ✅ N4 excellent | **ANTs** |
+| Brain extraction | Would need to implement | ✅ Excellent | **ANTs** |
+| Template registration | Would need templates | ✅ MNI templates | **ANTs** |
+
+### Recommendation: NO Hybrid Approach for CT
+
+**For CT registration, the pure Julia approach is sufficient and preferable:**
+
+1. **N4 bias correction is NOT needed** - CT doesn't have bias field artifacts
+2. **We already have the key preprocessing** - COM alignment, FOV overlap, HU windowing, resampling
+3. **Simpler user experience** - No Python/ANTs installation required
+4. **Full GPU acceleration** - Preprocessing runs on GPU with our library
+5. **Fewer dependencies** - Easier maintenance and deployment
+
+**If MRI support is added later:**
+- Consider optional ANTs integration via PythonCall
+- Make it a separate extension package (e.g., MedicalImageRegistrationANTs.jl)
+- Keep the main package dependency-free
+
+### What We Should Add Instead
+
+Rather than ANTs integration, focus on:
+
+1. **Denoising (optional)** - Simple bilateral/Gaussian filter if CT is noisy
+2. **Intensity normalization** - Z-score or min-max for non-HU images
+3. **Masking improvements** - Better body/air segmentation for COM
+
+These can all be GPU-accelerated with AK.foreachindex and stay pure Julia.
+
+### Conclusion
+
+**Decision: Do NOT integrate ANTs for CT preprocessing.**
+
+The complexity cost outweighs the benefits. Our pure Julia preprocessing pipeline handles the critical CT preprocessing steps (COM alignment, FOV overlap, HU windowing) with GPU acceleration.
+
+For future MRI support, consider an optional extension package that wraps ANTsPy via PythonCall, but keep the core library ANTs-free.
+
+### References
+
+- [ANTs N4BiasFieldCorrection Wiki](https://github.com/ANTsX/ANTs/wiki/N4BiasFieldCorrection)
+- [N4ITK: Improved N3 Bias Correction (PMC)](https://pmc.ncbi.nlm.nih.gov/articles/PMC3071855/)
+- [ANTsPy Registration Documentation](https://antspy.readthedocs.io/en/latest/registration.html)
+- [PythonCall.jl Documentation](https://juliapy.github.io/PythonCall.jl/stable/)
+
+---
