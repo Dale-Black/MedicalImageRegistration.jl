@@ -148,7 +148,7 @@
       "id": "IMPL-SYN-001",
       "type": "IMPL",
       "title": "Implement SyN diffeomorphic registration on GPU",
-      "status": "open",
+      "status": "done",
       "priority": 8,
       "blockedBy": ["IMPL-AFFINE-REG-001"],
       "description": "Implement SyN registration. Scaling-and-squaring, flow composition, all on GPU with Mooncake AD.",

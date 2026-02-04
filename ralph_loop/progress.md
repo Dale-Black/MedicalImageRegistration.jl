@@ -690,3 +690,129 @@ Loss decreased: true
 - ✓ Converges on test cases with MtlArrays (2D and 3D)
 
 ---
+
+### [IMPL-SYN-001] Implement SyN diffeomorphic registration on GPU
+
+**Status:** DONE
+**Date:** 2026-02-03
+
+#### Implementation Summary
+
+Implemented full SyN (Symmetric Normalization) diffeomorphic registration. The entire registration pipeline runs on GPU without any CPU fallbacks, using AcceleratedKernels.jl and Mooncake rrule!! for AD.
+
+#### Key Files
+- `src/syn.jl` - Main implementation (~1400 lines)
+- `test/test_syn.jl` - Comprehensive GPU test suite (84 tests)
+
+#### Features Implemented
+
+**Core Operations:**
+- **spatial_transform**: Warp image using displacement field (identity grid + displacement)
+- **diffeomorphic_transform**: Scaling-and-squaring algorithm to convert velocity to diffeomorphic displacement
+- **composition_transform**: Compose two displacement fields
+- **gauss_smoothing**: Separable Gaussian smoothing for flow regularization
+- **linear_elasticity**: Linear elasticity regularization loss
+
+**SyNRegistration struct:**
+- Multi-resolution pyramid (scales, iterations per scale)
+- Symmetric registration (forward and inverse flows)
+- Velocity field smoothing (sigma_flow)
+- Image smoothing (sigma_img)
+- Regularization weight (lambda_)
+- Configurable time_steps for scaling-and-squaring (default: 7)
+
+**API:**
+- `SyNRegistration{T}(; kwargs...)` - Constructor with sensible defaults
+- `reset!(reg)` - Reset velocity fields
+- `fit!(reg, moving, static)` - Run optimization
+- `register(reg, moving, static)` - Convenience function (fit + transform)
+- `transform(reg, image; direction=:forward/:inverse)` - Apply transform
+- `apply_flows(reg, x, y, v_xy, v_yx)` - Compute half and full flows/images
+
+#### Architecture
+
+SyN registration works by:
+1. Optimizing velocity fields `v_xy` (moving→static) and `v_yx` (static→moving)
+2. Converting velocities to diffeomorphic displacements via scaling-and-squaring
+3. Computing half-way images via warping with half-flows
+4. Computing full-flows via composition of half-flows
+5. Minimizing dissimilarity + regularization loss
+
+```julia
+# Scaling-and-squaring
+function diffeomorphic_transform(v; time_steps=7)
+    v_scaled = v / 2^time_steps
+    result = v_scaled
+    for _ in 1:time_steps
+        result = composition_transform(result, result)
+    end
+    return result
+end
+
+# Composition: result[p] = v2[p] + v1[p + v2[p]]
+function composition_transform(v1, v2)
+    v1_warped = spatial_transform_displacement(v1, v2)
+    return v2 + v1_warped
+end
+```
+
+#### GPU Compatibility Fixes
+
+1. **Non-bits type in closures**: Dict captured in AK.foreachindex fails on GPU. Fix: extract arrays before closure.
+   ```julia
+   # Wrong
+   AK.foreachindex(arr) do idx
+       arr[idx] = images[:xy_full][idx]  # Dict is not bits type!
+   end
+
+   # Correct
+   xy_full = images[:xy_full]  # Extract first
+   AK.foreachindex(arr) do idx
+       arr[idx] = xy_full[idx]
+   end
+   ```
+
+2. **Permutation for grid_sample**: Velocity field is (X, Y, Z, 3, N), but grid_sample expects grid as (3, X, Y, Z, N). Implemented `_permute_velocity_to_grid!` and `_permute_grid_to_velocity!`.
+
+3. **Identity grid creation**: Created on CPU then copied to GPU to avoid scalar indexing.
+
+#### Mooncake Integration
+
+All differentiable functions registered as primitives:
+```julia
+@is_primitive MinimalCtx Tuple{typeof(spatial_transform), AbstractArray{<:Any,5}, AbstractArray{<:Any,5}}
+@is_primitive MinimalCtx Tuple{typeof(diffeomorphic_transform), AbstractArray{<:Any,5}}
+@is_primitive MinimalCtx Tuple{typeof(composition_transform), AbstractArray{<:Any,5}, AbstractArray{<:Any,5}}
+@is_primitive MinimalCtx Tuple{typeof(linear_elasticity), AbstractArray{<:Any,5}}
+```
+
+Each has corresponding `rrule!!` with GPU-compatible backward pass.
+
+#### Test Results
+
+All 84 tests passed on Metal GPU:
+```
+Test Summary:    | Pass  Total     Time
+SyN Registration |   84     84  1m23.7s
+```
+
+Test coverage:
+- ✓ spatial_transform: identity, small displacement
+- ✓ diffeomorphic_transform: zero velocity, small/large velocity, different time_steps, batch support
+- ✓ composition_transform: identity, self-composition, compose with zero
+- ✓ gauss_smoothing: small sigma, variance reduction, batch support
+- ✓ linear_elasticity: zero/non-zero flow
+- ✓ SyNRegistration: constructor, custom params, reset!
+- ✓ fit!: basic 3D, loss tracking
+- ✓ apply_flows: output shapes, zero velocity
+- ✓ transform: forward/inverse after fit
+- ✓ Diffeomorphism properties: inverse composition, smooth output
+- ✓ Full registration: register function
+
+#### Acceptance Criteria Status
+- ✓ src/syn.jl with SyNRegistration struct
+- ✓ diffeomorphic_transform using AK.jl
+- ✓ Mooncake rrule!! for all custom ops
+- ✓ Converges on test cases with MtlArrays
+
+---
