@@ -473,7 +473,7 @@
       "id": "IMPL-RESAMPLE-001",
       "type": "IMPL",
       "title": "Implement displacement field resampling for multi-resolution workflow",
-      "status": "pending",
+      "status": "done",
       "priority": 23,
       "blockedBy": ["IMPL-PHYSICAL-001"],
       "description": "Implement functions to upsample/downsample displacement fields. CONTEXT: For cardiac CT workflow, we register at low resolution (2mm isotropic for speed) but need to apply the transform to the high-resolution (0.5mm) original image. Need to upsample the displacement field while maintaining diffeomorphic properties. Also need inverse transform computation for bidirectional registration.",

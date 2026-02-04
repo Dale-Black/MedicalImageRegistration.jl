@@ -20,6 +20,9 @@ include("mi_loss.jl")
 # Physical coordinates and anisotropic voxel support
 include("physical.jl")
 
+# Transform resampling for multi-resolution workflows
+include("resample_transform.jl")
+
 # Registration types and algorithms
 include("types.jl")
 include("affine.jl")
@@ -36,6 +39,11 @@ export mi_loss, nmi_loss
 export PhysicalImage
 export affine_grid_physical
 export resample
+
+# Exports - Transform resampling
+export resample_displacement, resample_velocity
+export upsample_affine_transform, upsample_affine_transform_physical
+export invert_displacement
 
 # Exports - SyN operations
 export spatial_transform, diffeomorphic_transform, composition_transform

@@ -5324,3 +5324,171 @@ grid = affine_grid_physical(theta, img_static)
 ```
 
 ---
+
+### [IMPL-RESAMPLE-001] Implement displacement field resampling for multi-resolution workflow
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+---
+
+## Overview
+
+Implemented displacement field resampling functions for the multi-resolution registration workflow. This is critical for the cardiac CT registration use case where we:
+1. Register at low resolution (2mm isotropic) for speed
+2. Upsample the transform to high resolution (0.5mm)
+3. Apply to the original high-res image with HU preservation
+
+## Key Functions Implemented
+
+### 1. `resample_displacement(disp, target_size)`
+
+Resample a displacement field to a new spatial size with proper value scaling.
+
+**Critical insight:** When upsampling from 2mm to 0.5mm resolution (4x), displacement VALUES must also be scaled. A 1-voxel displacement at 2mm = 4 voxels at 0.5mm.
+
+```julia
+# Register at 2mm (32³), apply at 0.5mm (128³)
+disp_lowres = diffeomorphic_transform(velocity)  # (32, 32, 32, 3, 1)
+disp_highres = resample_displacement(disp_lowres, (128, 128, 128))  # scaled 4x
+
+# Scale factor = (target_size - 1) / (source_size - 1)
+# For 32→128: scale = 127/31 ≈ 4.1x
+```
+
+### 2. `resample_velocity(v, target_size)`
+
+Alias for `resample_displacement` since velocity fields have the same scaling requirements.
+
+### 3. `upsample_affine_transform(theta, old_size, new_size)`
+
+For normalized coordinate systems ([-1, 1]), the affine matrix is resolution-independent.
+
+```julia
+# Affine doesn't need scaling in normalized coords
+theta_highres = upsample_affine_transform(theta_lowres, (32,32,32), (128,128,128))
+# Returns identical matrix
+```
+
+### 4. `upsample_affine_transform_physical(theta, old_spacing, new_spacing)`
+
+For physical (mm) coordinates, affine matrices need spacing-aware adjustment.
+
+```julia
+# Physical coords: spacing change requires matrix adjustment
+theta_05mm = upsample_affine_transform_physical(theta_2mm, (2.0, 2.0, 2.0), (0.5, 0.5, 0.5))
+# Translation scaled by 4x, rotation unchanged
+```
+
+### 5. `invert_displacement(disp; iterations=10)`
+
+Compute the inverse of a displacement field using fixed-point iteration.
+
+**Algorithm:** For φ where y = x + φ(x), inverse ψ satisfies x = y + ψ(y)
+- Initialize: ψ₀ = -φ
+- Iterate: ψₙ₊₁ = -φ(id + ψₙ)
+
+```julia
+# Bidirectional registration
+flow_forward = diffeomorphic_transform(v_xy)
+flow_inverse = invert_displacement(flow_forward; iterations=15)
+
+# Verify: x + forward + inverse(x + forward) ≈ x
+```
+
+## Implementation Details
+
+### GPU Acceleration
+
+All functions use `AK.foreachindex` for GPU-accelerated parallel processing:
+
+```julia
+function _scale_displacement_values(disp, scale_x, scale_y, scale_z)
+    output = similar(disp)
+    AK.foreachindex(output) do idx
+        i, j, k, d, n = _linear_to_cartesian_5d_disp(idx, X, Y, Z, D)
+        @inbounds val = disp[idx]
+        # Scale by dimension
+        if d == 1
+            @inbounds output[idx] = val * scale_x
+        elseif d == 2
+            @inbounds output[idx] = val * scale_y
+        else
+            @inbounds output[idx] = val * scale_z
+        end
+    end
+    return output
+end
+```
+
+### Mooncake rrule!!
+
+All functions have Mooncake rrule!! definitions for gradient propagation:
+
+```julia
+@is_primitive MinimalCtx Tuple{typeof(resample_displacement), AbstractArray{<:Any,5}, NTuple{3,Int}}
+@is_primitive MinimalCtx Tuple{typeof(resample_velocity), AbstractArray{<:Any,5}, NTuple{3,Int}}
+@is_primitive MinimalCtx Tuple{typeof(invert_displacement), AbstractArray{<:Any,5}}
+```
+
+## Test Results
+
+All 41 tests pass:
+
+```
+resample_displacement 3D:      13/13 ✓ (Identity, Upsample, Downsample, Round-trip)
+resample_displacement 2D:       2/2 ✓
+resample_velocity:              3/3 ✓
+upsample_affine_transform:      5/5 ✓ (normalized + physical)
+invert_displacement 3D:         6/6 ✓ (small disp, composition, properties)
+invert_displacement 2D:         2/2 ✓
+GPU array preservation:         4/4 ✓
+Batch support:                  3/3 ✓
+Edge cases:                     3/3 ✓
+```
+
+## Acceptance Criteria Status
+
+- ✓ `src/resample_transform.jl` with core functions
+- ✓ `resample_displacement(disp_field, target_size)` - bilinear/trilinear upsample
+- ✓ Displacement values scaled by resolution ratio
+- ✓ `resample_velocity(velocity_field, target_size)` - for SyN velocity fields
+- ✓ `upsample_affine_transform(theta, old_size, new_size)` - resolution change
+- ✓ `invert_displacement(disp_field; iterations=10)` - iterative inverse
+- ✓ All use AK.foreachindex for GPU
+- ✓ All have Mooncake rrule!!
+- ✓ Works on MtlArrays
+- ✓ Test: Upsample 2x then downsample 2x ≈ identity
+- ✓ Test: Displacement scaling is correct
+- ✓ Test: Inverse displacement field inverts original transform
+
+## Example: Full Multi-Resolution Workflow
+
+```julia
+using MedicalImageRegistration
+using Metal
+
+# Original images at different resolutions
+static_3mm = MtlArray(rand(Float32, 512, 512, 100, 1, 1))  # 3mm slices
+moving_05mm = MtlArray(rand(Float32, 512, 512, 600, 1, 1)) # 0.5mm slices
+
+# Step 1: Resample both to 2mm for registration
+static_2mm = resample(PhysicalImage(static_3mm; spacing=(0.5,0.5,3.0)), (2.0,2.0,2.0))
+moving_2mm = resample(PhysicalImage(moving_05mm; spacing=(0.5,0.5,0.5)), (2.0,2.0,2.0))
+
+# Step 2: Register at 2mm resolution (fast!)
+reg = SyNRegistration{Float32}()
+_, _, flow_2mm, _ = register(reg, parent(moving_2mm), parent(static_2mm))
+
+# Step 3: Upsample flow to 0.5mm resolution
+target_size = (512, 512, 600)  # match original moving image
+flow_05mm = resample_displacement(flow_2mm, target_size)
+
+# Step 4: Apply to original with HU preservation
+moved = spatial_transform(moving_05mm, flow_05mm; interpolation=:nearest)
+
+# Step 5: (Optional) Get inverse for bidirectional
+flow_inverse = invert_displacement(flow_05mm; iterations=15)
+```
+
+---

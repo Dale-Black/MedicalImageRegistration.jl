@@ -46,6 +46,9 @@ if PYTHON_AVAILABLE
 
     # HU preservation tests (don't require torchreg)
     include("test_hu_preservation.jl")
+
+    # Transform resampling tests
+    include("test_resample_transform.jl")
 else
     @warn "Skipping all Python-based parity tests"
 
