@@ -547,7 +547,7 @@
       "id": "DOC-CLINICAL-001",
       "type": "IMPL",
       "title": "Document clinical registration workflow in README",
-      "status": "pending",
+      "status": "done",
       "priority": 26,
       "blockedBy": ["TEST-CARDIAC-001"],
       "description": "Update README with clinical registration documentation. Add new section explaining the multi-modal registration workflow with concrete cardiac CT example. Document when to use MI vs MSE/NCC. Document physical coordinate handling and HU preservation.",

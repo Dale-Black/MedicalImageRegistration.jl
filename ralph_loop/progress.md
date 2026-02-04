@@ -5603,3 +5603,77 @@ Updated `examples/cardiac_ct.jl` Pluto notebook with complete clinical registrat
 - ✓ Works on Metal GPU (via MtlArray through register_clinical)
 - ✓ Add markdown cells explaining each step of the workflow
 - ✓ Notebook can be run end-to-end without errors (except @bind which requires Pluto)
+
+---
+
+### [DOC-CLINICAL-001] Document clinical registration workflow in README
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+Added comprehensive documentation for clinical CT registration workflow to README.md.
+
+**Sections Added:**
+
+1. **Clinical CT Registration** - Main section header
+2. **The Clinical Scenario** - Concrete cardiac CT example with tables showing:
+   - Resolution mismatch (3mm vs 0.5mm)
+   - Contrast intensity mismatch (40 HU vs 300+ HU blood)
+   - Clinical challenges
+
+3. **PhysicalImage Type** - Documentation with code example
+
+4. **register_clinical Workflow** - Complete code example showing:
+   - PhysicalImage creation
+   - Full register_clinical() call with all parameters
+   - Accessing results
+
+5. **Why Mutual Information?** - Table comparing MSE, NCC, and MI loss functions
+
+6. **Workflow Under the Hood** - ASCII diagram showing 4-step process
+
+7. **ClinicalRegistrationResult** - Struct documentation
+
+8. **Apply Transform to Other Images** - transform_clinical examples
+
+9. **Loss Function Selection Table** - When to use each loss function
+
+10. **Interpolation Mode Selection Table** - When to use bilinear vs nearest
+
+11. **Complete Example** - Full cardiac CT registration code with DICOM loading
+
+12. **API Reference Updates** - Added:
+    - PhysicalImage constructor
+    - register_clinical
+    - transform_clinical
+    - transform_clinical_inverse
+    - spatial_size, spatial_spacing, resample
+    - mi_loss, nmi_loss
+
+**Acceptance Criteria Status:**
+- ✓ README.md has new 'Clinical CT Registration' section
+- ✓ Documents the cardiac CT scenario: non-contrast 3mm vs contrast 0.5mm
+- ✓ Shows complete code example using register_clinical()
+- ✓ Explains MI loss and when to use it (contrast mismatch)
+- ✓ Explains physical coordinates and why they matter (anisotropic voxels)
+- ✓ Explains HU preservation workflow (preserve_hu=true)
+- ✓ Documents PhysicalImage type and how to create one
+- ✓ Documents ClinicalRegistrationResult and what it contains
+- ✓ Table: Which loss to use (MSE for same-modality, MI for different-modality)
+- ✓ Table: Interpolation mode selection (bilinear for visual, nearest for quantitative)
+- ✓ Link to cardiac_ct.jl notebook as example
+- ✓ Clear API reference for new functions
+
+---
+
+## ALL STORIES COMPLETE
+
+All 26 stories in prd.json are now marked as DONE. The MedicalImageRegistration.jl library is complete with:
+
+1. **Core Registration** - Affine and SyN diffeomorphic registration
+2. **GPU Acceleration** - AcceleratedKernels.jl + Mooncake rrule!!
+3. **HU Preservation** - Nearest-neighbor interpolation for quantitative CT
+4. **Clinical Workflow** - register_clinical() for anisotropic/multi-modal CT
+5. **Complete Documentation** - README, examples, tests
+
+RALPH_ALL_COMPLETE

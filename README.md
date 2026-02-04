@@ -212,6 +212,191 @@ This demo:
 4. Generates comparison GIFs and intensity histograms
 5. Prints quantitative analysis showing value preservation
 
+## Clinical CT Registration
+
+For clinical CT imaging with resolution mismatches and contrast agents, use the `register_clinical` workflow.
+
+### The Clinical Scenario
+
+A common clinical scenario is registering cardiac CT scans with different parameters:
+
+| Property | Scan 1 (Static/Reference) | Scan 2 (Moving) |
+|----------|---------------------------|-----------------|
+| **Contrast** | Non-contrast | With IV contrast |
+| **Slice Thickness** | 3.0 mm | 0.5 mm |
+| **Blood HU** | ~40 HU | ~300+ HU |
+| **Use Case** | Calcium scoring | Coronary visualization |
+
+**Challenges:**
+- **6x resolution difference** in z-direction (3mm vs 0.5mm slices)
+- **Intensity mismatch** from contrast agent (blood goes 40→300+ HU)
+- **HU preservation** required for quantitative analysis (calcium scoring threshold = 130 HU)
+
+### PhysicalImage Type
+
+Wrap volumes with physical spacing metadata:
+
+```julia
+using MedicalImageRegistration
+
+# Create PhysicalImage from volume + spacing
+volume = load_nifti("cardiac_ct.nii")  # (X, Y, Z, C, N) array
+spacing = (0.5f0, 0.5f0, 0.5f0)        # (x, y, z) in mm
+origin = (0f0, 0f0, 0f0)               # Optional origin
+
+img = PhysicalImage(volume; spacing=spacing, origin=origin)
+
+# Access properties
+spatial_size(img)     # (512, 512, 403)
+spatial_spacing(img)  # (0.5, 0.5, 0.5)
+img.data              # The underlying array
+```
+
+### register_clinical Workflow
+
+```julia
+using MedicalImageRegistration
+using Metal  # For GPU acceleration
+
+# Load CT scans with different resolutions
+non_contrast = PhysicalImage(volume1; spacing=(0.5f0, 0.5f0, 3.0f0))  # 3mm z-spacing
+contrast = PhysicalImage(volume2; spacing=(0.5f0, 0.5f0, 0.5f0))      # 0.5mm z-spacing
+
+# Register contrast (moving) → non-contrast (static)
+result = register_clinical(
+    contrast, non_contrast;
+    registration_resolution=2.0f0,  # Resample to 2mm isotropic for optimization
+    loss_fn=mi_loss,                # Mutual Information for contrast mismatch
+    preserve_hu=true,               # Nearest-neighbor for final output
+    registration_type=:affine,      # Or :syn for deformable
+    verbose=true
+)
+
+# Access results
+result.moved_image      # PhysicalImage with registered contrast CT
+result.transform        # Displacement field (can apply to other images)
+result.metrics          # Dict with :mi_before, :mi_after, :mi_improvement
+result.metadata         # Registration parameters and image info
+```
+
+### Why Mutual Information?
+
+Standard loss functions fail with contrast mismatch:
+
+| Loss Function | Assumption | Problem with Contrast |
+|--------------|------------|----------------------|
+| **MSE** | Same intensity = aligned | Blood is 40 vs 300 HU → penalizes correct alignment |
+| **NCC** | Linear intensity relationship | Nonlinear per-tissue contrast enhancement |
+| **MI** | Statistical dependence | Learns 40 HU ↔ 300 HU correspondence ✓ |
+
+Mutual Information measures *statistical dependence*, not intensity similarity. It learns that anatomically corresponding points have consistent intensity mappings.
+
+### Workflow Under the Hood
+
+```
+┌─────────────────────────────────────────────────┐
+│ 1. Resample both to registration_resolution     │
+│    (bilinear OK - just for optimization)        │
+└───────────────────────────────────────────────→─┘
+                        ↓
+┌─────────────────────────────────────────────────┐
+│ 2. Register with MI loss                        │
+│    (handles contrast intensity difference)       │
+└───────────────────────────────────────────────→─┘
+                        ↓
+┌─────────────────────────────────────────────────┐
+│ 3. Upsample transform to original resolution    │
+│    (transform is smooth, bilinear OK)           │
+└───────────────────────────────────────────────→─┘
+                        ↓
+┌─────────────────────────────────────────────────┐
+│ 4. Apply to ORIGINAL moving image               │
+│    preserve_hu=true → nearest-neighbor          │
+│    Output HU values = EXACT input values        │
+└─────────────────────────────────────────────────┘
+```
+
+### ClinicalRegistrationResult
+
+```julia
+struct ClinicalRegistrationResult{T, N, A}
+    moved_image::PhysicalImage{T,N,A}  # Registered image
+    transform::A                        # Displacement field
+    inverse_transform::Union{A,Nothing} # Optional inverse
+    metrics::Dict{Symbol, T}            # :mi_before, :mi_after, :mi_improvement
+    metadata::Dict{Symbol, Any}         # Spacing, sizes, parameters
+end
+```
+
+### Apply Transform to Other Images
+
+```julia
+# Apply the same transform to a segmentation mask
+mask = PhysicalImage(mask_volume; spacing=contrast.spacing)
+mask_transformed = transform_clinical(result, mask; interpolation=:nearest)
+
+# Apply inverse transform (if computed)
+result = register_clinical(...; compute_inverse=true)
+inverse_transformed = transform_clinical_inverse(result, some_image)
+```
+
+### Loss Function Selection
+
+| Scenario | Recommended Loss | Example |
+|----------|------------------|---------|
+| Same modality, no contrast | `mse_loss` | T1 MRI to T1 MRI |
+| Same modality with preprocessing | `ncc_loss` | Skull-stripped MRI |
+| **Different contrast agents** | `mi_loss` | Contrast CT to non-contrast CT |
+| **Multi-modal** | `mi_loss` | CT to MRI |
+| Binary segmentation | `dice_loss` | Mask alignment |
+
+### Interpolation Mode Selection
+
+| Use Case | Interpolation | Reason |
+|----------|--------------|--------|
+| **Visual alignment** | `:bilinear` | Smooth appearance |
+| **Calcium scoring** | `:nearest` | Exact HU for 130 HU threshold |
+| **Dose calculation** | `:nearest` | HU → electron density mapping |
+| **Tissue density measurement** | `:nearest` | Quantitative accuracy |
+| **Segmentation transfer** | `:bilinear` + threshold | Smooth probability maps |
+
+### Complete Example: Cardiac CT Registration
+
+See the full interactive example in [`examples/cardiac_ct.jl`](examples/cardiac_ct.jl) (Pluto notebook).
+
+```julia
+using MedicalImageRegistration
+using DICOM
+
+# Load DICOM series (simplified - see notebook for full loader)
+non_contrast_vol, nc_spacing = load_dicom_series("path/to/non_contrast/")
+contrast_vol, ccta_spacing = load_dicom_series("path/to/ccta/")
+
+# Create PhysicalImages
+nc = PhysicalImage(Float32.(non_contrast_vol); spacing=Float32.(nc_spacing))
+ccta = PhysicalImage(Float32.(contrast_vol); spacing=Float32.(ccta_spacing))
+
+# Register
+result = register_clinical(
+    ccta, nc;
+    registration_resolution=2.0f0,
+    loss_fn=mi_loss,
+    preserve_hu=true,
+    registration_type=:affine,
+    affine_scales=(4, 2, 1),
+    affine_iterations=(50, 25, 10),
+    verbose=true
+)
+
+# Verify HU preservation
+original_values = Set(vec(ccta.data))
+output_values = Set(vec(result.moved_image.data))
+@assert output_values ⊆ original_values  # True!
+
+# Report metrics
+println("MI improved: $(result.metrics[:mi_before]) → $(result.metrics[:mi_after])")
+```
+
 ## Array Conventions
 
 Julia uses column-major order. This package follows Julia conventions:
@@ -284,6 +469,21 @@ diffeomorphic_transform(velocity; time_steps=7)  # Scaling-and-squaring
 # Interpolation Modes
 # :bilinear/:trilinear - Smooth gradients, creates new values (default)
 # :nearest - HU-preserving, returns exact input values, zero gradients
+
+# Clinical Registration (anisotropic voxels, contrast mismatch)
+PhysicalImage(data; spacing=(1,1,1), origin=(0,0,0))  # Wrap array with physical metadata
+register_clinical(moving, static; registration_resolution=2.0, loss_fn=mi_loss, preserve_hu=true)
+transform_clinical(result, image; interpolation=:nearest)  # Apply learned transform
+transform_clinical_inverse(result, image)  # Apply inverse transform
+
+# Physical Image Operations
+spatial_size(img)      # Returns (X, Y, Z) size
+spatial_spacing(img)   # Returns (sx, sy, sz) spacing in mm
+resample(img, target_spacing)  # Resample to new spacing
+
+# Multi-modal Loss Functions
+mi_loss(pred, target; bins=64)   # Mutual Information (for contrast mismatch)
+nmi_loss(pred, target; bins=64)  # Normalized MI (more robust)
 ```
 
 ## Dependencies
