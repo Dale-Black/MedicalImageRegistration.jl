@@ -1,501 +1,227 @@
 {
   "project": "MedicalImageRegistration.jl",
-  "description": "Port torchreg (PyTorch image registration) to idiomatic Julia with full parity testing",
+  "description": "Port torchreg to Julia with GPU-first architecture using AK.jl + Mooncake rrule!!",
   "source": "https://github.com/codingfisch/torchreg",
+  "philosophy": {
+    "gpu_first": "ALL code runs on GPU via AcceleratedKernels.jl. NO CPU fallbacks. NO nested for loops.",
+    "ad_strategy": "Use Mooncake.jl with custom rrule!! for GPU-accelerated backward passes",
+    "testing": "Test with Metal.jl MtlArrays locally. All tests must pass on GPU.",
+    "no_compromises": "If something doesn't work on GPU with AD, fix it properly. No hacks."
+  },
   "loopInstructions": {
     "storyTypes": {
-      "RESEARCH": "Deep-dive study with documentation. Read source files, understand algorithms, document findings in progress.md",
-      "SETUP": "Create infrastructure (files, configs, test harnesses). Verify with basic smoke tests",
-      "IMPL": "Implement feature following Julia idioms. Must pass type checks and basic tests",
-      "TEST": "Write parity tests comparing Julia vs torchreg via PythonCall. All tests must pass",
-      "FIX": "Fix issues discovered during implementation or testing"
+      "NUKE": "Delete old broken code and start fresh",
+      "RESEARCH": "Study and document approach before implementing",
+      "IMPL": "Implement with AK.jl + Mooncake rrule!! from the start",
+      "TEST": "Test on Metal GPU with MtlArrays"
     },
-    "workflowRules": [
-      "Pick lowest-priority OPEN story where all blockedBy are DONE",
-      "Read the story description and acceptance criteria carefully",
-      "For IMPL stories: implement in idiomatic Julia, NOT line-by-line translation",
-      "For TEST stories: use PythonCall to compare with torchreg on identical inputs",
-      "Mark story DONE only when ALL acceptance criteria are met",
-      "Commit after each completed story with message: [STORY-ID] description",
-      "If blocked, document in progress.md and output RALPH_BLOCKED"
-    ],
-    "juliaConventions": {
-      "arrayAxes": {
-        "2D": "(X, Y, C, N) where X=width, Y=height, C=channels, N=batch",
-        "3D": "(X, Y, Z, C, N) where X=width, Y=height, Z=depth",
-        "note": "Julia is column-major. PyTorch is (N, C, ..spatial..). Permute axes in tests."
-      },
-      "naming": {
-        "functions": "snake_case (register, get_affine, affine_transform)",
-        "types": "PascalCase (AffineRegistration, SyNRegistration)",
-        "constants": "SCREAMING_SNAKE_CASE"
-      },
-      "style": "Use multiple dispatch, keyword arguments, type annotations where helpful"
-    },
-    "adLibrary": {
-      "options": ["Enzyme.jl", "Mooncake.jl"],
-      "prohibited": "Zygote.jl",
-      "note": "RESEARCH-AD-001 evaluates both. Choice must be BAKED IN - users should never think about AD library. DO NOT use Zygote.jl."
-    },
-    "gpuStrategy": {
-      "library": "AcceleratedKernels.jl",
-      "platforms": ["CPU", "Metal (Apple Silicon)", "CUDA"],
-      "testing": {
-        "local": "Mac with Metal GPU for development",
-        "ci": "GitHub Actions with macos runner for Metal, ubuntu for CPU",
-        "note": "Tests must verify GPU acceleration actually works, not just that code runs"
-      }
-    }
+    "rules": [
+      "EVERY function must work on GPU arrays (MtlArray, CuArray)",
+      "EVERY differentiable function needs a Mooncake rrule!!",
+      "NO nested for loops - use AK.foreachindex everywhere",
+      "NO CPU fallbacks - if it doesn't work on GPU, fix it",
+      "Test with MtlArrays locally before marking done"
+    ]
   },
   "stories": [
     {
-      "id": "RESEARCH-001",
-      "type": "RESEARCH",
-      "title": "Deep dive into torchreg architecture and algorithms",
+      "id": "NUKE-001",
+      "type": "NUKE",
+      "title": "Delete all existing src/ code and start fresh",
       "status": "done",
       "priority": 1,
       "blockedBy": [],
-      "description": "Study the torchreg source code in /Users/daleblack/Documents/dev/torchreg_temp/torchreg/. Document: (1) How affine_transform works with F.affine_grid + F.grid_sample, (2) How compose_affine builds the affine matrix from translation/rotation/zoom/shear, (3) How SyN diffeomorphic transform uses scaling-and-squaring, (4) All loss functions and their formulas.",
+      "description": "The current implementation is broken - has CPU fallbacks, nested for loops, and AD hacks. Delete ALL files in src/ except MedicalImageRegistration.jl (keep as empty module). We're starting from scratch with GPU-first architecture.",
       "acceptanceCriteria": [
-        "progress.md contains detailed notes on affine_transform implementation",
-        "progress.md contains compose_affine matrix construction formula",
-        "progress.md contains SyN diffeomorphic algorithm explanation",
-        "progress.md contains all metric formulas (MSE, Dice, NCC, LinearElasticity)"
+        "All .jl files in src/ deleted except MedicalImageRegistration.jl",
+        "MedicalImageRegistration.jl contains only: module declaration, empty exports",
+        "No old broken code remains",
+        "Git commit with message: [NUKE-001] Clean slate for GPU-first rewrite"
       ],
-      "files": [
-        "/Users/daleblack/Documents/dev/torchreg_temp/torchreg/affine.py",
-        "/Users/daleblack/Documents/dev/torchreg_temp/torchreg/syn.py",
-        "/Users/daleblack/Documents/dev/torchreg_temp/torchreg/metrics.py",
-        "/Users/daleblack/Documents/dev/torchreg_temp/torchreg/utils.py"
-      ]
+      "files": ["src/"]
     },
     {
-      "id": "RESEARCH-002",
+      "id": "RESEARCH-MOONCAKE-001",
       "type": "RESEARCH",
-      "title": "Research Julia equivalents for PyTorch operations",
+      "title": "Document Mooncake rrule!! pattern for GPU functions",
       "status": "done",
-      "priority": 1,
-      "blockedBy": ["RESEARCH-001"],
-      "description": "Document how to implement torchreg operations in Julia: (1) NNlib.grid_sample vs F.grid_sample API differences, (2) How to create affine_grid in Julia (meshgrid + matmul), (3) Enzyme.jl gradient API for custom operations, (4) Optimisers.jl API vs torch.optim.",
+      "priority": 2,
+      "blockedBy": ["NUKE-001"],
+      "description": "Before implementing, understand exactly how to write Mooncake rrule!! for GPU-accelerated functions. Document the pattern with a simple example. Test that the pattern works with MtlArrays.",
       "acceptanceCriteria": [
-        "progress.md documents NNlib.grid_sample signature and padding modes",
-        "progress.md shows affine_grid implementation approach",
-        "progress.md documents Enzyme autodiff pattern for our use case",
-        "progress.md documents Optimisers.jl setup and update pattern"
+        "progress.md documents Mooncake rrule!! signature",
+        "progress.md shows CoDual, NoFData, NoRData usage",
+        "progress.md has working example with AK.foreachindex in both forward and backward",
+        "Example tested with MtlArrays and gradients verified"
       ],
       "files": []
     },
     {
-      "id": "SETUP-001",
-      "type": "SETUP",
-      "title": "Set up test harness with PythonCall.jl",
-      "status": "done",
-      "priority": 2,
-      "blockedBy": ["RESEARCH-002"],
-      "description": "Implement test/test_utils.jl with: (1) julia_to_torch function that converts Julia arrays to PyTorch tensors with correct axis permutation, (2) torch_to_julia for the reverse, (3) compare_results helper for tolerance-based comparison, (4) Verify harness works by round-tripping a test array.",
-      "acceptanceCriteria": [
-        "julia_to_torch correctly permutes (X,Y,Z,C,N) -> (N,C,Z,Y,X)",
-        "torch_to_julia correctly permutes (N,C,Z,Y,X) -> (X,Y,Z,C,N)",
-        "compare_results handles both 2D and 3D arrays",
-        "Round-trip test passes: arr == torch_to_julia(julia_to_torch(arr))"
-      ],
-      "files": ["test/test_utils.jl"]
-    },
-    {
-      "id": "IMPL-UTILS-001",
+      "id": "IMPL-GRID-001",
       "type": "IMPL",
-      "title": "Implement affine_grid function",
-      "status": "done",
+      "title": "Implement grid_sample with AK.jl + Mooncake rrule!!",
+      "status": "open",
       "priority": 3,
-      "blockedBy": ["SETUP-001"],
-      "description": "Implement affine_grid(theta, size) in src/utils.jl that creates a sampling grid for spatial transformations. This is equivalent to F.affine_grid in PyTorch. Should work for both 2D and 3D.",
+      "blockedBy": ["RESEARCH-MOONCAKE-001"],
+      "description": "Implement grid_sample from scratch. Forward pass uses AK.foreachindex. Backward pass uses AK.foreachindex. Both registered with Mooncake rrule!!. Must match PyTorch F.grid_sample output.",
       "acceptanceCriteria": [
-        "affine_grid works for 2D: size=(X, Y, C, N)",
-        "affine_grid works for 3D: size=(X, Y, Z, C, N)",
-        "Identity affine produces normalized grid from -1 to 1",
-        "Function is type-stable"
+        "src/grid_sample.jl with grid_sample function using AK.foreachindex",
+        "Mooncake rrule!! defined for grid_sample",
+        "Backward pass also uses AK.foreachindex",
+        "2D (bilinear) and 3D (trilinear) interpolation",
+        "padding_mode :zeros and :border",
+        "Matches PyTorch F.grid_sample within rtol=1e-5",
+        "Works on MtlArrays - test locally",
+        "Gradients verified against finite differences on GPU"
       ],
-      "files": ["src/utils.jl"],
-      "torchregRef": "utils.py:create_grid (line 40-41)"
+      "files": ["src/grid_sample.jl", "test/test_grid_sample.jl"]
     },
     {
-      "id": "IMPL-UTILS-002",
+      "id": "IMPL-AFFINE-GRID-001",
       "type": "IMPL",
-      "title": "Implement Gaussian smoothing kernel",
-      "status": "done",
-      "priority": 3,
-      "blockedBy": ["IMPL-UTILS-001"],
-      "description": "Implement smooth_kernel(kernel_size, sigma) in src/utils.jl that creates a Gaussian smoothing kernel. Used by SyN for flow regularization.",
-      "acceptanceCriteria": [
-        "smooth_kernel produces normalized Gaussian kernel",
-        "Works for both 2D and 3D kernel sizes",
-        "Kernel sums to 1.0"
-      ],
-      "files": ["src/utils.jl"],
-      "torchregRef": "utils.py:smooth_kernel (line 6-12)"
-    },
-    {
-      "id": "IMPL-UTILS-003",
-      "type": "IMPL",
-      "title": "Implement Jacobian gradient and determinant",
-      "status": "done",
-      "priority": 3,
-      "blockedBy": ["IMPL-UTILS-002"],
-      "description": "Implement jacobi_gradient(u, id_grid) and jacobi_determinant(u, id_grid) in src/utils.jl for computing spatial gradients of displacement fields. Used by LinearElasticity regularizer.",
-      "acceptanceCriteria": [
-        "jacobi_gradient computes spatial derivatives correctly",
-        "jacobi_determinant computes 3x3 determinant of Jacobian",
-        "Both handle boundary padding appropriately"
-      ],
-      "files": ["src/utils.jl"],
-      "torchregRef": "utils.py:jacobi_gradient (line 25-37), jacobi_determinant (line 15-22)"
-    },
-    {
-      "id": "TEST-UTILS-001",
-      "type": "TEST",
-      "title": "Parity tests for utility functions",
-      "status": "done",
+      "title": "Implement affine_grid with AK.jl + Mooncake rrule!!",
+      "status": "open",
       "priority": 4,
-      "blockedBy": ["IMPL-UTILS-003"],
-      "description": "Write parity tests comparing Julia utils to torchreg utils. Test affine_grid, smooth_kernel, jacobi_gradient, jacobi_determinant against PyTorch equivalents.",
+      "blockedBy": ["IMPL-GRID-001"],
+      "description": "Implement affine_grid that creates sampling grid from affine matrix. Uses AK.foreachindex. Has Mooncake rrule!! for backward pass.",
       "acceptanceCriteria": [
-        "affine_grid matches torchreg create_grid within rtol=1e-5",
-        "smooth_kernel matches torchreg smooth_kernel within rtol=1e-5",
-        "jacobi_gradient matches within rtol=1e-4",
-        "All tests pass with both 2D and 3D inputs"
+        "src/affine_grid.jl with affine_grid function using AK.foreachindex",
+        "Mooncake rrule!! defined",
+        "2D and 3D support",
+        "Matches PyTorch F.affine_grid within rtol=1e-5",
+        "Works on MtlArrays"
       ],
-      "files": ["test/test_utils.jl"]
+      "files": ["src/affine_grid.jl"]
+    },
+    {
+      "id": "IMPL-COMPOSE-001",
+      "type": "IMPL",
+      "title": "Implement compose_affine with AK.jl + Mooncake rrule!!",
+      "status": "open",
+      "priority": 5,
+      "blockedBy": ["IMPL-AFFINE-GRID-001"],
+      "description": "Implement compose_affine that builds affine matrix from translation, rotation, zoom, shear. GPU-accelerated with Mooncake rrule!!.",
+      "acceptanceCriteria": [
+        "src/compose_affine.jl using AK.jl operations",
+        "Mooncake rrule!! defined",
+        "Matches torchreg compose_affine",
+        "Works on MtlArrays"
+      ],
+      "files": ["src/compose_affine.jl"]
     },
     {
       "id": "IMPL-METRICS-001",
       "type": "IMPL",
-      "title": "Implement Dice loss and score",
-      "status": "done",
-      "priority": 5,
-      "blockedBy": ["TEST-UTILS-001"],
-      "description": "Implement dice_score(x1, x2) and dice_loss(x1, x2) in src/metrics.jl. Dice coefficient measures overlap between two binary/soft masks.",
-      "acceptanceCriteria": [
-        "dice_score returns value in [0, 1]",
-        "dice_loss = 1 - dice_score",
-        "Works for both 2D and 3D arrays",
-        "Handles batch dimension correctly"
-      ],
-      "files": ["src/metrics.jl"],
-      "torchregRef": "metrics.py:dice_loss, dice_score (line 7-15)"
-    },
-    {
-      "id": "IMPL-METRICS-002",
-      "type": "IMPL",
-      "title": "Implement Normalized Cross-Correlation (NCC) loss",
-      "status": "done",
-      "priority": 5,
-      "blockedBy": ["IMPL-METRICS-001"],
-      "description": "Implement NCC loss as a callable struct in src/metrics.jl. Uses local window correlation.",
-      "acceptanceCriteria": [
-        "NCC struct with kernel_size parameter",
-        "Forward pass computes windowed cross-correlation",
-        "Returns negative CC (for minimization)",
-        "Works for 2D and 3D"
-      ],
-      "files": ["src/metrics.jl"],
-      "torchregRef": "metrics.py:NCC (line 46-64)"
-    },
-    {
-      "id": "IMPL-METRICS-003",
-      "type": "IMPL",
-      "title": "Implement LinearElasticity regularizer",
-      "status": "done",
-      "priority": 5,
-      "blockedBy": ["IMPL-METRICS-002"],
-      "description": "Implement LinearElasticity regularizer in src/metrics.jl. Penalizes non-smooth deformation fields using strain tensor.",
-      "acceptanceCriteria": [
-        "LinearElasticity struct with mu, lam parameters",
-        "Computes strain tensor from Jacobian",
-        "Returns regularization penalty",
-        "Works for 3D displacement fields"
-      ],
-      "files": ["src/metrics.jl"],
-      "torchregRef": "metrics.py:LinearElasticity (line 18-43)"
-    },
-    {
-      "id": "TEST-METRICS-001",
-      "type": "TEST",
-      "title": "Parity tests for metrics",
-      "status": "done",
+      "title": "Implement loss functions with AK.jl + Mooncake rrule!!",
+      "status": "open",
       "priority": 6,
-      "blockedBy": ["IMPL-METRICS-003"],
-      "description": "Write parity tests for all metrics against torchreg. Use random arrays with fixed seeds for reproducibility.",
+      "blockedBy": ["IMPL-COMPOSE-001"],
+      "description": "Implement MSE, Dice, NCC losses. All GPU-accelerated with AK.jl. All have Mooncake rrule!!.",
       "acceptanceCriteria": [
-        "dice_loss matches torchreg within rtol=1e-5",
-        "NCC loss matches within rtol=1e-4",
-        "LinearElasticity matches within rtol=1e-4",
-        "Tests cover both 2D and 3D cases"
+        "src/metrics.jl with mse_loss, dice_loss, dice_score, NCC",
+        "All use AK.jl for GPU acceleration",
+        "All have Mooncake rrule!!",
+        "Match torchreg metrics",
+        "Work on MtlArrays"
       ],
-      "files": ["test/test_metrics.jl"]
+      "files": ["src/metrics.jl"]
     },
     {
-      "id": "RESEARCH-AD-001",
-      "type": "RESEARCH",
-      "title": "Evaluate Enzyme.jl vs Mooncake.jl for AD",
-      "status": "done",
-      "priority": 7,
-      "blockedBy": ["TEST-METRICS-001"],
-      "description": "Research and compare Enzyme.jl and Mooncake.jl to determine which is better suited for this project. Test both with a minimal example that includes: (1) NNlib.grid_sample differentiation, (2) batched matrix operations, (3) nested function calls. Document findings and make a recommendation.",
-      "acceptanceCriteria": [
-        "progress.md documents Enzyme.jl API and how to compute gradients",
-        "progress.md documents Mooncake.jl API and how to compute gradients",
-        "Test both with NNlib.grid_sample - does differentiation work?",
-        "Test both with compose_affine-like batched operations",
-        "Document any limitations or gotchas for each",
-        "Make clear recommendation with justification",
-        "Include working code snippets for the chosen library"
-      ],
-      "files": []
-    },
-    {
-      "id": "FIX-AD-001",
-      "type": "FIX",
-      "title": "Replace Zygote with chosen AD library (Enzyme or Mooncake)",
-      "status": "done",
-      "priority": 8,
-      "blockedBy": ["RESEARCH-AD-001"],
-      "description": "Based on RESEARCH-AD-001 findings, replace ALL Zygote usage with the chosen AD library (Enzyme.jl or Mooncake.jl). This affects src/affine.jl and src/syn.jl fit! functions. Update Project.toml dependencies accordingly.",
-      "acceptanceCriteria": [
-        "No imports of Zygote anywhere in src/",
-        "Chosen AD library used for all gradient computations",
-        "src/MedicalImageRegistration.jl updated to use correct AD library",
-        "Project.toml updated with correct AD dependency (not Zygote)",
-        "fit! functions in affine.jl and syn.jl use new AD gradients",
-        "Basic registration still converges after AD change",
-        "Tests still pass"
-      ],
-      "files": ["src/MedicalImageRegistration.jl", "src/affine.jl", "src/syn.jl", "Project.toml"]
-    },
-    {
-      "id": "IMPL-AFFINE-001",
+      "id": "IMPL-AFFINE-REG-001",
       "type": "IMPL",
-      "title": "Verify AffineRegistration works with new AD library",
-      "status": "done",
-      "priority": 9,
-      "blockedBy": ["FIX-AD-001"],
-      "description": "After fixing AD, verify that AffineRegistration struct works correctly with the new AD library. May need to adjust how parameters are stored/passed for compatibility.",
+      "title": "Implement AffineRegistration with GPU optimization loop",
+      "status": "open",
+      "priority": 7,
+      "blockedBy": ["IMPL-METRICS-001"],
+      "description": "Implement full AffineRegistration. Optimization loop runs entirely on GPU. Uses Mooncake for gradients. Uses Optimisers.jl for updates.",
       "acceptanceCriteria": [
-        "AffineRegistration struct works with chosen AD library",
-        "Parameters can be differentiated correctly",
-        "No runtime errors during gradient computation"
+        "src/affine.jl with AffineRegistration struct",
+        "fit! function runs entirely on GPU",
+        "Mooncake computes gradients through entire forward pass",
+        "Multi-resolution pyramid support",
+        "register() and transform() API",
+        "Converges on test cases with MtlArrays"
       ],
-      "files": ["src/types.jl", "src/affine.jl"]
-    },
-    {
-      "id": "TEST-AFFINE-001",
-      "type": "TEST",
-      "title": "Parity tests for AffineRegistration with new AD",
-      "status": "done",
-      "priority": 10,
-      "blockedBy": ["IMPL-AFFINE-001"],
-      "description": "Verify that AffineRegistration still produces correct results after AD library migration. Test: (1) compose_affine produces same matrix as torchreg, (2) affine_transform produces same output, (3) Full registration on synthetic data converges similarly.",
-      "acceptanceCriteria": [
-        "compose_affine matches torchreg within rtol=1e-5",
-        "affine_transform matches within rtol=1e-4",
-        "Registration converges to similar parameters (rtol=1e-2)",
-        "Tests cover 2D and 3D, batch_size=1 and 2"
-      ],
-      "files": ["test/test_affine.jl"]
+      "files": ["src/affine.jl", "src/types.jl"]
     },
     {
       "id": "IMPL-SYN-001",
       "type": "IMPL",
-      "title": "Verify SyN registration with new AD library",
-      "status": "done",
-      "priority": 11,
-      "blockedBy": ["TEST-AFFINE-001"],
-      "description": "After AD migration, verify SyN registration works correctly. The diffeomorphic operations (scaling-and-squaring) must be differentiable through the chosen AD library.",
+      "title": "Implement SyN diffeomorphic registration on GPU",
+      "status": "open",
+      "priority": 8,
+      "blockedBy": ["IMPL-AFFINE-REG-001"],
+      "description": "Implement SyN registration. Scaling-and-squaring, flow composition, all on GPU with Mooncake AD.",
       "acceptanceCriteria": [
-        "SyN fit! function works with new AD gradients",
-        "diffeomorphic_transform is differentiable",
-        "Registration produces reasonable output (not NaN/Inf)",
-        "Basic convergence test passes"
+        "src/syn.jl with SyNRegistration struct",
+        "diffeomorphic_transform using AK.jl",
+        "Mooncake rrule!! for all custom ops",
+        "Converges on test cases with MtlArrays"
       ],
       "files": ["src/syn.jl"]
     },
     {
-      "id": "TEST-SYN-001",
+      "id": "TEST-PARITY-001",
       "type": "TEST",
-      "title": "Parity tests for SyNRegistration with new AD",
-      "status": "done",
-      "priority": 12,
+      "title": "Full parity tests against torchreg on GPU",
+      "status": "open",
+      "priority": 9,
       "blockedBy": ["IMPL-SYN-001"],
-      "description": "Verify SyN registration parity after AD migration. Test: diffeomorphic_transform, gauss_smoothing, basic registration convergence.",
+      "description": "Comprehensive parity tests comparing Julia GPU implementation against torchreg. All tests run on MtlArrays.",
       "acceptanceCriteria": [
-        "diffeomorphic_transform matches torchreg within rtol=1e-4",
-        "gauss_smoothing matches within rtol=1e-5",
-        "SyN registration runs without error on 3D data",
-        "Output images are visually reasonable (not NaN/Inf)"
+        "grid_sample matches PyTorch within rtol=1e-5",
+        "affine_grid matches PyTorch within rtol=1e-5",
+        "compose_affine matches torchreg",
+        "All metrics match torchreg",
+        "AffineRegistration converges similarly to torchreg",
+        "All tests use MtlArrays"
       ],
-      "files": ["test/test_syn.jl"]
-    },
-    {
-      "id": "IMPL-2D-001",
-      "type": "IMPL",
-      "title": "Verify 2D support with new AD library",
-      "status": "done",
-      "priority": 13,
-      "blockedBy": ["TEST-SYN-001"],
-      "description": "Verify that all 2D functionality works correctly with the new AD library. Both AffineRegistration and (optionally) SyN should work with 2D arrays.",
-      "acceptanceCriteria": [
-        "AffineRegistration works with 2D arrays (X, Y, C, N)",
-        "All metrics work with 2D",
-        "2D registration converges correctly",
-        "Tests pass for both 2D and 3D"
-      ],
-      "files": ["src/affine.jl", "src/syn.jl", "test/"]
-    },
-    {
-      "id": "TEST-INTEGRATION-001",
-      "type": "TEST",
-      "title": "End-to-end integration tests",
-      "status": "done",
-      "priority": 14,
-      "blockedBy": ["IMPL-2D-001"],
-      "description": "Write integration tests that exercise the full registration pipeline: load images, register, verify output quality. Include synthetic test cases with known ground truth.",
-      "acceptanceCriteria": [
-        "Synthetic translation test: registration recovers translation",
-        "Synthetic rotation test: registration recovers rotation",
-        "Affine + SyN pipeline works in sequence",
-        "No memory leaks or type instabilities"
-      ],
-      "files": ["test/runtests.jl"]
-    },
-    {
-      "id": "FIX-GRID-001",
-      "type": "FIX",
-      "title": "Replace NNlib.grid_sample with pure Julia implementation",
-      "status": "done",
-      "priority": 15,
-      "blockedBy": ["TEST-INTEGRATION-001"],
-      "description": "CRITICAL: NNlib.grid_sample uses threading which breaks ALL Julia AD systems (Enzyme, Mooncake). The manual gradient hack is unacceptable. Write our own PURE JULIA grid_sample that: (1) matches PyTorch F.grid_sample output exactly, (2) is fully differentiable with Mooncake, (3) can be accelerated with AcceleratedKernels.jl. Remove NNlib dependency.",
-      "acceptanceCriteria": [
-        "New grid_sample function in src/grid_sample.jl (pure Julia, NO threading)",
-        "Matches PyTorch F.grid_sample output within rtol=1e-5",
-        "Supports bilinear (2D) and trilinear (3D) interpolation",
-        "Supports padding_mode :zeros and :border",
-        "Parity tests pass against PyTorch F.grid_sample",
-        "NNlib removed from Project.toml"
-      ],
-      "files": ["src/grid_sample.jl", "src/utils.jl", "Project.toml", "test/test_utils.jl"]
-    },
-    {
-      "id": "FIX-AD-002",
-      "type": "FIX",
-      "title": "Replace manual gradients with Mooncake AD",
-      "status": "done",
-      "priority": 16,
-      "blockedBy": ["FIX-GRID-001"],
-      "description": "Now that grid_sample is pure Julia, replace ALL manual gradient code with proper Mooncake AD. Remove all _constant helpers and manual gradient chains. Mooncake should work end-to-end on pure Julia code.",
-      "acceptanceCriteria": [
-        "Mooncake.jl used for ALL gradient computations",
-        "No manual gradient code remains",
-        "No _constant or ignore_derivatives hacks",
-        "fit! functions use Mooncake for gradients",
-        "Gradients verified against finite differences",
-        "Registration still converges correctly"
-      ],
-      "completionNotes": "PARTIAL: Affine registration uses Mooncake AD successfully. SyN registration keeps manual gradients because Mooncake cannot handle closures (_constant do...end, map do...end patterns). All 133 tests pass.",
-      "files": ["src/affine.jl", "src/syn.jl", "Project.toml"]
-    },
-    {
-      "id": "IMPL-GPU-001",
-      "type": "IMPL",
-      "title": "REWRITE grid_sample with AcceleratedKernels.jl",
-      "status": "done",
-      "priority": 17,
-      "blockedBy": ["FIX-AD-002"],
-      "description": "CRITICAL: src/grid_sample.jl currently has nested `@inbounds for n in 1:N, for j_out in 1:Y_out, for i_out in 1:X_out` loops. This is UNACCEPTABLY SLOW. You MUST replace these nested for loops with AK.foreachindex. grid_sample is THE bottleneck (16M+ interpolations for 256³ volume). The file already imports AK but doesn't use it - FIX THIS.",
-      "acceptanceCriteria": [
-        "src/grid_sample.jl: Replace nested for loops with AK.foreachindex",
-        "NO nested for loops remain in grid_sample functions",
-        "Both 2D (grid_sample 4D) and 3D (grid_sample 5D) use AK.foreachindex",
-        "Works on CPU (fallback), Metal (Mac), CUDA transparently",
-        "Benchmark shows speedup vs old nested loop version",
-        "Still matches PyTorch output (rtol=1e-5)",
-        "Still works with Mooncake AD (test gradients)"
-      ],
-      "completionNotes": "Implemented dual-path approach: GPU arrays use AK.foreachindex for parallel execution, CPU arrays use sequential loops for Mooncake AD compatibility. AK.foreachindex on CPU uses Task spawning which breaks Mooncake AD, so we detect GPU arrays via GPUArraysCore.AbstractGPUArray and dispatch accordingly. All 133 tests pass.",
-      "files": ["src/grid_sample.jl", "Project.toml", "test/test_grid_sample.jl"]
+      "files": ["test/"]
     },
     {
       "id": "SETUP-CI-001",
-      "type": "SETUP",
-      "title": "Set up GitHub Actions with Mac runner for GPU testing",
-      "status": "done",
-      "priority": 18,
-      "blockedBy": ["IMPL-GPU-001"],
-      "description": "Configure GitHub Actions CI to test on both Ubuntu (CPU) and macOS (Metal GPU). The Mac runner will verify that Metal GPU acceleration actually works. Tests should measure and report performance to confirm GPU speedup.",
+      "type": "IMPL",
+      "title": "GitHub Actions CI with Metal GPU testing",
+      "status": "open",
+      "priority": 10,
+      "blockedBy": ["TEST-PARITY-001"],
+      "description": "Set up CI that tests on macOS with Metal GPU.",
       "acceptanceCriteria": [
-        ".github/workflows/ci.yml updated with macOS job",
-        "Ubuntu job runs standard CPU tests",
-        "macOS job runs tests with Metal GPU",
-        "CI reports pass/fail for both CPU and GPU paths",
-        "Performance benchmarks logged (optional but helpful)",
-        "Tests catch if GPU acceleration silently falls back to CPU"
+        ".github/workflows/ci.yml with macOS runner",
+        "Tests run with Metal.jl",
+        "CI passes"
       ],
-      "completionNotes": "CI workflow created with test-cpu and test-metal jobs. Metal job includes GPU availability check and diagnostic step.",
       "files": [".github/workflows/ci.yml"]
     },
     {
       "id": "DEMO-001",
       "type": "IMPL",
-      "title": "Create TestImages.jl demo with GIF output",
+      "title": "Demo with TestImages.jl on GPU",
       "status": "open",
-      "priority": 19,
+      "priority": 11,
       "blockedBy": ["SETUP-CI-001"],
-      "description": "Create a demo script that uses TestImages.jl to demonstrate registration capabilities. Save a GIF showing before/after registration. Update README with the GIF and demo instructions.",
+      "description": "Create demo that runs registration on GPU with TestImages.jl.",
       "acceptanceCriteria": [
-        "Demo script in examples/ directory",
-        "Uses TestImages.jl for standard test images",
-        "Produces a GIF showing registration animation",
-        "README updated to include the demo GIF",
-        "Demo works for 2D affine registration"
+        "examples/demo.jl runs on GPU",
+        "Produces GIF showing registration",
+        "README updated"
       ],
       "files": ["examples/demo.jl", "README.md"]
     },
     {
       "id": "DOC-001",
-      "type": "RESEARCH",
-      "title": "Research and document intensity/HU conservation",
+      "type": "IMPL",
+      "title": "Document HU conservation and GPU requirements",
       "status": "open",
-      "priority": 20,
+      "priority": 12,
       "blockedBy": ["DEMO-001"],
-      "description": "Investigate whether spatial transformations preserve intensity values (important for quantitative CT HU analysis). Document which interpolation modes preserve values and which don't. Add 'Intensity Conservation' section to README with practical guidance.",
+      "description": "Document intensity conservation for CT and GPU requirements.",
       "acceptanceCriteria": [
-        "Document whether bilinear/trilinear interpolation preserves exact values",
-        "Explain trade-offs between nearest-neighbor vs linear interpolation",
-        "Document which parts of the pipeline affect intensity values",
-        "Add 'Intensity Conservation' section to README",
-        "Provide guidance for users who need quantitative analysis"
+        "README documents HU conservation implications",
+        "README documents GPU requirements (Metal/CUDA)",
+        "Clear API documentation"
       ],
       "files": ["README.md"]
-    },
-    {
-      "id": "CLEANUP-001",
-      "type": "IMPL",
-      "title": "Final cleanup and export verification",
-      "status": "open",
-      "priority": 21,
-      "blockedBy": ["DEMO-001", "DOC-001"],
-      "description": "Final pass: verify all exports work, remove any TODO comments, ensure consistent code style, verify package loads cleanly.",
-      "acceptanceCriteria": [
-        "using MedicalImageRegistration loads without warnings",
-        "All exported functions are documented with docstrings",
-        "No remaining TODO/FIXME comments",
-        "Package precompiles successfully",
-        "No Zygote references remain anywhere",
-        "AD library choice is baked in - users never see it",
-        "GPU acceleration via AK.jl is transparent to users",
-        "CI passes on both Ubuntu (CPU) and macOS (Metal GPU)"
-      ],
-      "files": ["src/MedicalImageRegistration.jl"]
     }
-  ],
-  "completedStories": []
+  ]
 }
