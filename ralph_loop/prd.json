@@ -60,7 +60,7 @@
       "id": "IMPL-GRID-001",
       "type": "IMPL",
       "title": "Implement grid_sample with AK.jl + Mooncake rrule!!",
-      "status": "open",
+      "status": "done",
       "priority": 3,
       "blockedBy": ["RESEARCH-MOONCAKE-001"],
       "description": "Implement grid_sample from scratch. Forward pass uses AK.foreachindex. Backward pass uses AK.foreachindex. Both registered with Mooncake rrule!!. Must match PyTorch F.grid_sample output.",

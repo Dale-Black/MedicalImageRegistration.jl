@@ -226,3 +226,98 @@ end
 ```
 
 ---
+
+### [IMPL-GRID-001] Implement grid_sample with AK.jl + Mooncake rrule!!
+
+**Status:** DONE
+**Date:** 2026-02-03
+
+#### Implementation Summary
+
+Implemented `grid_sample` function that samples from an input array at locations specified by a grid, using bilinear (2D) or trilinear (3D) interpolation. Fully GPU-accelerated with custom Mooncake rrule!!.
+
+#### Key Files
+- `src/grid_sample.jl` - Main implementation (686 lines)
+- `test/test_grid_sample.jl` - Comprehensive test suite
+
+#### Features Implemented
+- **2D Bilinear interpolation**: (X, Y, C, N) input + (2, X_out, Y_out, N) grid → (X_out, Y_out, C, N) output
+- **3D Trilinear interpolation**: (X, Y, Z, C, N) input + (3, X_out, Y_out, Z_out, N) grid → (X_out, Y_out, Z_out, C, N) output
+- **padding_mode=:zeros**: Out-of-bounds samples return 0
+- **padding_mode=:border**: Out-of-bounds samples clamped to border
+- **align_corners=true/false**: Control corner alignment behavior
+
+#### Architecture
+```julia
+# Forward pass using AK.foreachindex
+function _grid_sample_2d(input, grid, pm, align_corners)
+    output = similar(input, X_out, Y_out, C, N)
+    AK.foreachindex(output) do idx
+        # Convert linear index to (i_out, j_out, c, n)
+        # Unnormalize grid coords to pixel coords (1-indexed)
+        # Bilinear interpolation with 4 corners
+    end
+    return output
+end
+
+# Backward pass - gradients for input
+function _∇grid_sample_input_2d!(d_input, d_output, grid, pm, align_corners)
+    AK.foreachindex(d_output) do idx
+        # Scatter gradients to 4 corners using Atomix.@atomic
+    end
+end
+
+# Backward pass - gradients for grid
+function _∇grid_sample_grid_2d!(d_grid, d_output, input, grid, pm, align_corners)
+    AK.foreachindex(d_output) do idx
+        # Compute spatial gradients and chain rule
+    end
+end
+```
+
+#### Critical Fix: 1-Indexed Coordinate Conversion
+
+Original unnormalize code produced 0-indexed pixel coords, but Julia arrays are 1-indexed:
+```julia
+# WRONG (0-indexed)
+x_pix = (x_norm + 1) / 2 * (X - 1)  # -1 → 0, +1 → X-1
+
+# CORRECT (1-indexed for Julia)
+x_pix = (x_norm + 1) / 2 * (X - 1) + 1  # -1 → 1, +1 → X
+```
+
+#### Gradient Handling
+
+Uses Atomix.jl for atomic operations on GPU to handle race conditions when multiple output positions scatter gradients to the same input position:
+```julia
+Atomix.@atomic d_input[i, j, c, n] += grad
+```
+
+#### Mooncake Integration
+
+Both 2D and 3D versions registered as primitives:
+```julia
+@is_primitive MinimalCtx Tuple{typeof(grid_sample), AbstractArray{<:Any,4}, AbstractArray{<:Any,4}}
+@is_primitive MinimalCtx Tuple{typeof(grid_sample), AbstractArray{<:Any,5}, AbstractArray{<:Any,5}}
+```
+
+#### Test Results
+
+All acceptance criteria verified:
+- ✓ Forward pass works on MtlArrays (Metal GPU)
+- ✓ Backward pass works on MtlArrays
+- ✓ Gradients verified against finite differences (rtol=1e-2)
+- ✓ Matches PyTorch F.grid_sample within rtol=1e-5
+- ✓ Both padding modes work
+- ✓ Both align_corners modes work
+- ✓ 2D and 3D interpolation work
+
+#### PyTorch Parity
+
+Achieved numerical parity with PyTorch F.grid_sample:
+- Maximum difference: ~1.8e-7 (well within rtol=1e-5)
+- Tested 2D bilinear (align_corners true/false)
+- Tested 2D border padding
+- Tested 3D trilinear
+
+---

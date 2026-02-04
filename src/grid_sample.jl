@@ -173,25 +173,29 @@ end
 # ============================================================================
 
 @inline function _unnormalize_2d(x_norm::T, y_norm::T, X::Int, Y::Int, align_corners::Bool) where T
+    # Convert normalized [-1, 1] coordinates to 1-indexed pixel coordinates
+    # align_corners=true: -1 maps to index 1, +1 maps to index X (pixel centers at corners)
+    # align_corners=false: -1 maps to index 0.5, +1 maps to index X+0.5 (pixel edges at corners)
     if align_corners
-        x_pix = (x_norm + one(T)) / 2 * T(X - 1)
-        y_pix = (y_norm + one(T)) / 2 * T(Y - 1)
+        x_pix = (x_norm + one(T)) / 2 * T(X - 1) + one(T)
+        y_pix = (y_norm + one(T)) / 2 * T(Y - 1) + one(T)
     else
-        x_pix = (x_norm + one(T)) / 2 * T(X) - T(0.5)
-        y_pix = (y_norm + one(T)) / 2 * T(Y) - T(0.5)
+        x_pix = (x_norm + one(T)) / 2 * T(X) + T(0.5)
+        y_pix = (y_norm + one(T)) / 2 * T(Y) + T(0.5)
     end
     return x_pix, y_pix
 end
 
 @inline function _unnormalize_3d(x_norm::T, y_norm::T, z_norm::T, X::Int, Y::Int, Z::Int, align_corners::Bool) where T
+    # Convert normalized [-1, 1] coordinates to 1-indexed pixel coordinates
     if align_corners
-        x_pix = (x_norm + one(T)) / 2 * T(X - 1)
-        y_pix = (y_norm + one(T)) / 2 * T(Y - 1)
-        z_pix = (z_norm + one(T)) / 2 * T(Z - 1)
+        x_pix = (x_norm + one(T)) / 2 * T(X - 1) + one(T)
+        y_pix = (y_norm + one(T)) / 2 * T(Y - 1) + one(T)
+        z_pix = (z_norm + one(T)) / 2 * T(Z - 1) + one(T)
     else
-        x_pix = (x_norm + one(T)) / 2 * T(X) - T(0.5)
-        y_pix = (y_norm + one(T)) / 2 * T(Y) - T(0.5)
-        z_pix = (z_norm + one(T)) / 2 * T(Z) - T(0.5)
+        x_pix = (x_norm + one(T)) / 2 * T(X) + T(0.5)
+        y_pix = (y_norm + one(T)) / 2 * T(Y) + T(0.5)
+        z_pix = (z_norm + one(T)) / 2 * T(Z) + T(0.5)
     end
     return x_pix, y_pix, z_pix
 end
