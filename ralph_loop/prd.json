@@ -212,7 +212,7 @@
       "id": "DOC-001",
       "type": "IMPL",
       "title": "Document HU conservation and GPU requirements",
-      "status": "open",
+      "status": "done",
       "priority": 12,
       "blockedBy": ["DEMO-001"],
       "description": "Document intensity conservation for CT and GPU requirements.",

@@ -1107,3 +1107,44 @@ Learned affine matrix:
 - ✓ README updated (API examples fixed, GPU instructions added)
 
 ---
+
+### [DOC-001] Document HU conservation and GPU requirements
+
+**Status:** DONE
+**Date:** 2026-02-03
+
+#### Implementation Summary
+
+Added comprehensive documentation to README.md covering GPU requirements, intensity (HU) conservation implications for medical imaging, and a complete API reference.
+
+#### Sections Added to README
+
+**1. GPU Requirements Section:**
+- Table of supported GPU backends (Metal, CUDA, ROCm, CPU)
+- Code examples for Metal and CUDA usage
+- Performance notes (10-100x speedup, memory requirements)
+
+**2. Intensity Conservation (HU Values) Section:**
+- Explanation of why HU values change during interpolation
+- Recommendations table for different use cases:
+  - Visual alignment
+  - Quantitative analysis
+  - Dose calculation
+  - Segmentation transfer
+- Code example for preserving original intensities
+
+**3. API Reference Section:**
+- Full documentation of `AffineRegistration` constructor with all parameters
+- Full documentation of `SyNRegistration` constructor with all parameters
+- Complete list of functions with signatures:
+  - Registration functions (register, fit!, transform, reset!)
+  - Affine-specific functions (get_affine, affine_transform, compose_affine, affine_grid)
+  - Loss functions (mse_loss, dice_loss, dice_score, ncc_loss)
+  - Low-level operations (grid_sample, spatial_transform, diffeomorphic_transform)
+
+#### Acceptance Criteria Status
+- ✓ README documents HU conservation implications (detailed section with recommendations)
+- ✓ README documents GPU requirements (Metal/CUDA with examples)
+- ✓ Clear API documentation (full parameter lists and function signatures)
+
+---
