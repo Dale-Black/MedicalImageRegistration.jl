@@ -43,6 +43,9 @@ if PYTHON_AVAILABLE
     include("test_grid_sample.jl")
     include("test_affine_grid.jl")
     include("test_compose_affine.jl")
+
+    # HU preservation tests (don't require torchreg)
+    include("test_hu_preservation.jl")
 else
     @warn "Skipping all Python-based parity tests"
 
