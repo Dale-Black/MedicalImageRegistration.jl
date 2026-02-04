@@ -130,7 +130,7 @@
       "id": "IMPL-AFFINE-REG-001",
       "type": "IMPL",
       "title": "Implement AffineRegistration with GPU optimization loop",
-      "status": "open",
+      "status": "done",
       "priority": 7,
       "blockedBy": ["IMPL-METRICS-001"],
       "description": "Implement full AffineRegistration. Optimization loop runs entirely on GPU. Uses Mooncake for gradients. Uses Optimisers.jl for updates.",

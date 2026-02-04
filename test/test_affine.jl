@@ -1,14 +1,316 @@
-# Affine registration parity tests with torchreg
-# Tests compose_affine, affine_transform, and full registration
+# Affine registration tests
+# Tests compose_affine, affine_transform, AffineRegistration, and full registration
 
 using Test
 using MedicalImageRegistration
 using Random
 using LinearAlgebra
+using Statistics
 
-# PythonCall setup (torch and np are defined in runtests.jl)
+# Try to import Metal, fall back to CPU if not available
+const USE_GPU = try
+    using Metal
+    Metal.functional()
+catch
+    false
+end
 
-@testset "AffineRegistration" begin
+if USE_GPU
+    println("Testing with Metal GPU (MtlArray)")
+    const ArrayType = MtlArray
+else
+    println("Testing with CPU arrays")
+    const ArrayType = Array
+end
+
+# ============================================================================
+# GPU AffineRegistration Tests (No Python dependencies)
+# ============================================================================
+
+@testset "AffineRegistration GPU Tests" begin
+
+    @testset "Constructor and Reset" begin
+        # Test 2D constructor
+        reg2d = AffineRegistration{Float32}(
+            is_3d=false,
+            scales=(4, 2),
+            iterations=(10, 5),
+            batch_size=1,
+            array_type=ArrayType
+        )
+        @test reg2d.is_3d == false
+        @test size(reg2d.translation) == (2, 1)
+        @test size(reg2d.rotation) == (2, 2, 1)
+        @test size(reg2d.zoom) == (2, 1)
+        @test size(reg2d.shear) == (2, 1)
+
+        # Check initial values
+        @test all(Array(reg2d.translation) .== 0)
+        @test Array(reg2d.rotation[:, :, 1]) ≈ [1.0 0.0; 0.0 1.0]
+        @test all(Array(reg2d.zoom) .== 1)
+        @test all(Array(reg2d.shear) .== 0)
+
+        # Test 3D constructor
+        reg3d = AffineRegistration{Float32}(
+            is_3d=true,
+            scales=(2,),
+            iterations=(5,),
+            batch_size=1,
+            array_type=ArrayType
+        )
+        @test reg3d.is_3d == true
+        @test size(reg3d.translation) == (3, 1)
+        @test size(reg3d.rotation) == (3, 3, 1)
+        @test size(reg3d.zoom) == (3, 1)
+        @test size(reg3d.shear) == (3, 1)
+
+        # Test reset
+        reg3d.translation .= 1.0f0
+        reset!(reg3d)
+        @test all(Array(reg3d.translation) .== 0)
+    end
+
+    @testset "get_affine" begin
+        reg = AffineRegistration{Float32}(
+            is_3d=false,
+            batch_size=1,
+            array_type=ArrayType
+        )
+
+        theta = get_affine(reg)
+        @test size(theta) == (2, 3, 1)
+
+        # Identity transformation
+        theta_cpu = Array(theta)
+        @test theta_cpu[1, 1, 1] ≈ 1.0  # scale x
+        @test theta_cpu[2, 2, 1] ≈ 1.0  # scale y
+        @test theta_cpu[1, 2, 1] ≈ 0.0  # no shear/rotation
+        @test theta_cpu[2, 1, 1] ≈ 0.0  # no shear/rotation
+        @test theta_cpu[1, 3, 1] ≈ 0.0  # no translation x
+        @test theta_cpu[2, 3, 1] ≈ 0.0  # no translation y
+    end
+
+    @testset "affine_transform 2D" begin
+        # Create simple test image
+        img_cpu = zeros(Float32, 16, 16, 1, 1)
+        img_cpu[4:12, 4:12, 1, 1] .= 1.0f0  # White square in center
+        img = ArrayType(img_cpu)
+
+        # Identity transform
+        theta_cpu = Float32[1 0 0; 0 1 0]
+        theta = ArrayType(reshape(theta_cpu, 2, 3, 1))
+
+        out = affine_transform(img, theta)
+        @test size(out) == size(img)
+        @test Array(out) ≈ Array(img) atol=1e-5
+    end
+
+    @testset "affine_transform 3D" begin
+        # Create simple test volume
+        vol_cpu = zeros(Float32, 8, 8, 8, 1, 1)
+        vol_cpu[2:6, 2:6, 2:6, 1, 1] .= 1.0f0  # White cube in center
+        vol = ArrayType(vol_cpu)
+
+        # Identity transform
+        theta_cpu = Float32[1 0 0 0; 0 1 0 0; 0 0 1 0]
+        theta = ArrayType(reshape(theta_cpu, 3, 4, 1))
+
+        out = affine_transform(vol, theta)
+        @test size(out) == size(vol)
+        @test Array(out) ≈ Array(vol) atol=1e-5
+    end
+
+    @testset "fit! 2D registration" begin
+        # Create moving and static images with known transformation
+        # Static: square in center
+        static_cpu = zeros(Float32, 32, 32, 1, 1)
+        static_cpu[10:22, 10:22, 1, 1] .= 1.0f0
+
+        # Moving: same square but slightly shifted
+        moving_cpu = zeros(Float32, 32, 32, 1, 1)
+        moving_cpu[12:24, 12:24, 1, 1] .= 1.0f0  # Shifted by 2 pixels
+
+        static = ArrayType(static_cpu)
+        moving = ArrayType(moving_cpu)
+
+        reg = AffineRegistration{Float32}(
+            is_3d=false,
+            scales=(2,),
+            iterations=(50,),  # Few iterations for test
+            learning_rate=0.05f0,
+            with_translation=true,
+            with_rotation=false,
+            with_zoom=false,
+            with_shear=false,
+            batch_size=1,
+            array_type=ArrayType
+        )
+
+        fit!(reg, moving, static; verbose=false)
+
+        # Check that loss decreased
+        @test length(reg.loss_history) == 50
+        @test reg.loss_history[end] < reg.loss_history[1]  # Loss should decrease
+
+        # Check that translation was learned (should be negative to shift moving back)
+        t = Array(reg.translation)
+        # The translation should be non-zero and in the right direction
+        @test abs(t[1, 1]) > 0.001 || abs(t[2, 1]) > 0.001
+    end
+
+    @testset "fit! 3D registration" begin
+        # Create moving and static volumes
+        static_cpu = zeros(Float32, 16, 16, 16, 1, 1)
+        static_cpu[4:12, 4:12, 4:12, 1, 1] .= 1.0f0
+
+        # Moving: same cube but slightly shifted
+        moving_cpu = zeros(Float32, 16, 16, 16, 1, 1)
+        moving_cpu[5:13, 5:13, 5:13, 1, 1] .= 1.0f0  # Shifted by 1 pixel
+
+        static = ArrayType(static_cpu)
+        moving = ArrayType(moving_cpu)
+
+        reg = AffineRegistration{Float32}(
+            is_3d=true,
+            scales=(2,),
+            iterations=(30,),  # Few iterations for test
+            learning_rate=0.05f0,
+            with_translation=true,
+            with_rotation=false,
+            with_zoom=false,
+            with_shear=false,
+            batch_size=1,
+            array_type=ArrayType
+        )
+
+        fit!(reg, moving, static; verbose=false)
+
+        # Check that loss decreased
+        @test length(reg.loss_history) == 30
+        @test reg.loss_history[end] < reg.loss_history[1]
+    end
+
+    @testset "register convenience function 2D" begin
+        # Create simple images
+        static_cpu = zeros(Float32, 32, 32, 1, 1)
+        static_cpu[8:24, 8:24, 1, 1] .= 1.0f0
+
+        moving_cpu = zeros(Float32, 32, 32, 1, 1)
+        moving_cpu[10:26, 10:26, 1, 1] .= 1.0f0
+
+        static = ArrayType(static_cpu)
+        moving = ArrayType(moving_cpu)
+
+        reg = AffineRegistration{Float32}(
+            is_3d=false,
+            scales=(2,),
+            iterations=(30,),
+            learning_rate=0.05f0,
+            with_translation=true,
+            with_rotation=false,
+            with_zoom=false,
+            with_shear=false,
+            batch_size=1,
+            array_type=ArrayType
+        )
+
+        moved = register(reg, moving, static; verbose=false)
+
+        @test size(moved) == size(static)
+        @test moved isa typeof(static)
+
+        # Moved should be more similar to static than moving was
+        initial_mse = mean((moving_cpu .- static_cpu).^2)
+        final_mse = mean((Array(moved) .- static_cpu).^2)
+        @test final_mse < initial_mse
+    end
+
+    @testset "transform function" begin
+        reg = AffineRegistration{Float32}(
+            is_3d=false,
+            batch_size=1,
+            array_type=ArrayType
+        )
+
+        # Create test image
+        img = ArrayType(rand(Float32, 32, 32, 1, 1))
+
+        # Transform with identity (no fit yet)
+        out = transform(reg, img)
+        @test size(out) == size(img)
+        @test Array(out) ≈ Array(img) atol=1e-5
+
+        # Transform to different size
+        out_small = transform(reg, img, (16, 16))
+        @test size(out_small) == (16, 16, 1, 1)
+    end
+
+    @testset "Multi-resolution pyramid 2D" begin
+        static_cpu = zeros(Float32, 64, 64, 1, 1)
+        static_cpu[16:48, 16:48, 1, 1] .= 1.0f0
+
+        moving_cpu = zeros(Float32, 64, 64, 1, 1)
+        moving_cpu[20:52, 20:52, 1, 1] .= 1.0f0
+
+        static = ArrayType(static_cpu)
+        moving = ArrayType(moving_cpu)
+
+        # Test multi-scale
+        reg = AffineRegistration{Float32}(
+            is_3d=false,
+            scales=(4, 2),
+            iterations=(20, 10),  # 20 at scale 4, 10 at scale 2
+            learning_rate=0.05f0,
+            with_translation=true,
+            batch_size=1,
+            array_type=ArrayType
+        )
+
+        fit!(reg, moving, static; verbose=false)
+
+        # Should have total of 30 iterations
+        @test length(reg.loss_history) == 30
+        # Loss should generally decrease
+        @test reg.loss_history[end] < reg.loss_history[1]
+    end
+
+    @testset "Parameters enabled/disabled" begin
+        static_cpu = zeros(Float32, 32, 32, 1, 1)
+        static_cpu[8:24, 8:24, 1, 1] .= 1.0f0
+
+        moving_cpu = zeros(Float32, 32, 32, 1, 1)
+        moving_cpu[10:26, 10:26, 1, 1] .= 1.0f0
+
+        static = ArrayType(static_cpu)
+        moving = ArrayType(moving_cpu)
+
+        # Only zoom enabled
+        reg = AffineRegistration{Float32}(
+            is_3d=false,
+            scales=(2,),
+            iterations=(20,),
+            learning_rate=0.01f0,
+            with_translation=false,
+            with_rotation=false,
+            with_zoom=true,
+            with_shear=false,
+            batch_size=1,
+            array_type=ArrayType
+        )
+
+        fit!(reg, moving, static; verbose=false)
+
+        # Translation should remain zero
+        @test all(abs.(Array(reg.translation)) .< 1e-6)
+    end
+
+end
+
+# ============================================================================
+# PyTorch Parity Tests (require PythonCall)
+# ============================================================================
+
+@testset "AffineRegistration PyTorch Parity" begin
     # Import torchreg.affine
     sys = pyimport("sys")
     sys.path.insert(0, "/Users/daleblack/Documents/dev/torchreg_temp")

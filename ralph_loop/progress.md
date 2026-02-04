@@ -549,3 +549,144 @@ ncc_loss      |   16     16
 ```
 
 ---
+
+### [IMPL-AFFINE-REG-001] Implement AffineRegistration with GPU optimization loop
+
+**Status:** DONE
+**Date:** 2026-02-03
+
+#### Implementation Summary
+
+Implemented full affine image registration with GPU-accelerated optimization loop. The entire registration pipeline runs on GPU without any CPU fallbacks.
+
+#### Key Files
+- `src/types.jl` - AffineRegistration struct (~180 lines)
+- `src/affine.jl` - Registration algorithm (~550 lines)
+
+#### Architecture
+
+The registration follows torchreg's architecture:
+1. Multi-resolution pyramid (coarse-to-fine)
+2. Adam optimizer for parameter updates
+3. Composition: `compose_affine` → `affine_grid` → `grid_sample` → `loss`
+
+```julia
+# Full registration pipeline
+reg = AffineRegistration{Float32}(
+    is_3d=false,
+    scales=(4, 2),          # Multi-resolution scales
+    iterations=(500, 100),  # Iterations per scale
+    learning_rate=0.01f0,
+    with_translation=true,
+    with_rotation=true,
+    with_zoom=true,
+    with_shear=false,
+    array_type=MtlArray     # GPU arrays
+)
+
+moved = register(reg, moving, static)  # Returns moved image
+```
+
+#### GPU-Compatible Design
+
+Key challenges solved:
+
+1. **No Scalar Indexing**: All array initialization done on CPU then transferred:
+   ```julia
+   theta_cpu = zeros(T, 2, 3, N)
+   for n in 1:N
+       theta_cpu[1, 1, n] = one(T)
+       theta_cpu[2, 2, n] = one(T)
+   end
+   theta = similar(image, 2, 3, N)
+   copyto!(theta, theta_cpu)
+   ```
+
+2. **Bits-Type Closures**: GPU kernels require bits types. Extract arrays from structs before closure:
+   ```julia
+   # Wrong: captures non-bits AdamState struct
+   AK.foreachindex(param) do idx
+       state.m[idx] = ...  # Fails on GPU
+   end
+
+   # Correct: capture array directly
+   m_arr = state.m
+   AK.foreachindex(param) do idx
+       m_arr[idx] = ...  # Works on GPU
+   end
+   ```
+
+3. **Manual Gradient Chain**: Since Mooncake cannot autodiff through AK.foreachindex, we manually chain the pullbacks:
+   ```julia
+   # Forward: compose_affine → affine_grid → grid_sample → loss
+   # Backward: d_loss → d_moved → d_grid → d_theta → d_params
+   ```
+
+#### Features Implemented
+
+**AffineRegistration struct**:
+- Configuration: scales, iterations, learning_rate, align_corners, padding_mode
+- Parameter flags: with_translation, with_rotation, with_zoom, with_shear
+- Parameters: translation (D,N), rotation (D,D,N), zoom (D,N), shear (D,N)
+- Loss history tracking
+
+**Functions**:
+- `AffineRegistration{T}(; kwargs...)` - Constructor with sensible defaults
+- `reset!(reg)` - Reset parameters to identity
+- `get_affine(reg)` - Get current affine matrix
+- `fit!(reg, moving, static)` - Run optimization
+- `register(reg, moving, static)` - Convenience function (fit + transform)
+- `transform(reg, image)` - Apply current transform to image
+- `affine_transform(image, theta)` - Apply explicit affine matrix
+
+**Adam Optimizer**:
+- GPU-compatible implementation using AK.foreachindex
+- Per-parameter learning rate
+- Standard hyperparameters: β₁=0.9, β₂=0.999, ε=1e-8
+
+**Multi-Resolution Pyramid**:
+- Coarse-to-fine optimization
+- Image resampling via grid_sample with identity affine
+- Configurable scales and iterations per scale
+
+#### Test Results
+
+All acceptance criteria verified:
+
+**2D Registration on MtlArray**:
+```
+Scale 1/1: scale=2, shape=(16, 16), iters=50
+  Iter 1/50: loss = 0.067637
+  Iter 50/50: loss = 0.000425
+Loss decreased: true
+```
+
+**3D Registration on MtlArray**:
+```
+Scale 1/1: scale=2, shape=(8, 8, 8), iters=30
+  Iter 1/30: loss = 0.003846
+  Iter 30/30: loss = 0.002603
+Loss decreased: true
+```
+
+**Multi-Resolution Pyramid on MtlArray**:
+```
+Scale 1/2: scale=4, shape=(16, 16), iters=30
+  Iter 1/30: loss = 0.117188
+  Iter 30/30: loss = 0.001056
+Scale 2/2: scale=2, shape=(32, 32), iters=20
+  Iter 1/20: loss = 0.00142
+  Iter 20/20: loss = 0.000606
+Total iterations: 50
+Loss decreased: true
+```
+
+#### Acceptance Criteria Status
+- ✓ src/affine.jl with AffineRegistration struct
+- ✓ fit! function runs entirely on GPU
+- ✓ Manual gradient computation through entire forward pass (compose_affine → affine_grid → grid_sample → loss)
+- ✓ Multi-resolution pyramid support
+- ✓ register() and transform() API
+- ✓ Converges on test cases with MtlArrays (2D and 3D)
+
+---
