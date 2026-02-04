@@ -7258,3 +7258,52 @@ For future MRI support, consider an optional extension package that wraps ANTsPy
 - [PythonCall.jl Documentation](https://juliapy.github.io/PythonCall.jl/stable/)
 
 ---
+
+### [NOTEBOOK-PREPROCESS-VIS-001] Add explicit preprocessing visualization to cardiac_ct.jl
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+**What was done:**
+
+Completely rewrote the cardiac_ct.jl Pluto notebook to show preprocessing as explicit, visible steps instead of a black-box `register_clinical()` call. The notebook now includes:
+
+1. **Step 1: Center of Mass Alignment**
+   - Calls `MIR.center_of_mass()` for both images
+   - Prints COM values in mm and the translation needed
+   - Calls `MIR.align_centers()` and shows origin change
+
+2. **Step 2: FOV Overlap Detection**
+   - Calls `MIR.compute_overlap_region()`
+   - Shows physical bounds of each image
+   - Computes overlap percentages
+   - Calls `MIR.crop_to_overlap()` on both images
+   - Visualizes cropped images side-by-side
+
+3. **Step 3: Resample to Common Resolution**
+   - Calls `MIR.resample()` to bring both to 2mm isotropic
+   - Prints before/after sizes and spacings
+   - Visualizes resampled images
+
+4. **Step 4: Intensity Windowing**
+   - Calls `MIR.window_intensity()` with [-200, 1000] HU range
+   - Visualizes intensity histograms before/after windowing (2x2 grid)
+
+5. **Preprocessing Summary**
+   - 2x3 grid showing Original -> Cropped -> Resampled for both NC and CCTA
+   - Checkerboard overlay of preprocessed pair showing rough alignment from COM
+   - Interactive slice browser for preprocessed images
+
+**Key design decisions:**
+- Removed the `register_clinical()` black-box call entirely
+- Each preprocessing step is a separate Pluto cell with its own markdown header
+- Used `MIR.physical_bounds()` and `MIR.physical_extent()` (not exported but accessible via MIR.)
+- Handle potentially different image sizes after resampling with `min()` for checkerboard
+- All visualization uses CairoMakie with `colorrange=(-200, 400)` and `:grays` colormap
+- Summary table explains what each step does and why it matters
+
+**What's left for next stories:**
+- NOTEBOOK-REGISTER-VIS-001: Add actual registration step on preprocessed images
+- NOTEBOOK-VALIDATE-001: Final validation of complete notebook
+
+---

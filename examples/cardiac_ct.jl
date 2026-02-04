@@ -286,24 +286,6 @@ let
 	fig
 end
 
-# ╔═╡ e536974f-8e81-4ac6-b8cc-c1c0d28c36d2
-md"""
-## Volumes Ready for Registration
-
-The volumes are now in the format expected by MedicalImageRegistration: `(X, Y, Z, C, N)`
-
-**Note:** Before registration, you may need to:
-1. Resample to a common grid (for optimization)
-2. Handle the contrast vs non-contrast intensity difference (Mutual Information loss)
-3. Apply the final transform with `interpolation=:nearest` to preserve HU values
-"""
-
-# ╔═╡ 1f83def0-ee53-4c2c-979e-dd36d4197746
-nc_volume = nc_data.volume  # Ready for registration
-
-# ╔═╡ 170936b5-e78e-431d-8687-a860d95769ac
-ccta_volume = ccta_data.volume  # Ready for registration
-
 # ╔═╡ 8a3f2d1e-5b6c-4d8a-9e7f-1a2b3c4d5e6f
 md"""
 ## Create PhysicalImage Objects
@@ -317,7 +299,6 @@ This is critical for handling the resolution mismatch between the two scans:
 # ╔═╡ 9b4e5f6a-7c8d-4e9a-0f1a-2b3c4d5e6f7a
 begin
 	# Create PhysicalImage from non-contrast volume
-	# Ensure all spacing values are Float32 for consistency
 	nc_spacing = Float32.(nc_data.spacing)  # (x, y, z) in mm
 	nc_origin = Float32.(nc_data.origin)
 	nc_physical = MIR.PhysicalImage(nc_data.volume; spacing=nc_spacing, origin=nc_origin)
@@ -329,7 +310,6 @@ end
 # ╔═╡ 0c5d6e7b-8f9a-4b0c-1d2e-3f4a5b6c7d8e
 begin
 	# Create PhysicalImage from CCTA contrast volume
-	# Ensure all spacing values are Float32 for consistency
 	ccta_spacing = Float32.(ccta_data.spacing)  # (x, y, z) in mm
 	ccta_origin = Float32.(ccta_data.origin)
 	ccta_physical = MIR.PhysicalImage(ccta_data.volume; spacing=ccta_spacing, origin=ccta_origin)
@@ -338,323 +318,424 @@ begin
 	println("  Size: $(MIR.spatial_size(ccta_physical)) voxels")
 end
 
-# ╔═╡ 1d6e7f8c-9a0b-4c1d-2e3f-4a5b6c7d8e9f
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889900
 md"""
-## Registration with Preprocessing + Mutual Information
+# Preprocessing Pipeline
 
-Now we run the clinical registration workflow with **preprocessing enabled**:
+Before registration can work, we need to preprocess the images. Without preprocessing, gradient descent cannot find a good solution because:
 
-**Preprocessing steps (critical for FOV mismatch!):**
-1. **Compute centers of mass** for both images
-2. **Align COMs** - translate images so hearts are roughly aligned
-3. **Detect overlapping FOV** - find where both images cover
-4. **Crop to overlap** - focus registration on shared region
-5. **Resample to common resolution** (2mm isotropic for speed)
+1. **FOV mismatch**: CCTA has a tight FOV (heart only), non-contrast has wide FOV (whole chest)
+2. **Resolution mismatch**: 0.5mm vs 3mm z-spacing (6x difference!)
+3. **Center misalignment**: The images are centered differently in physical space
 
-**Registration steps:**
-6. **Register with MI loss** (handles contrast vs non-contrast intensity difference)
-7. **Upsample transform** to original high resolution
-8. **Apply to ORIGINAL image with nearest-neighbor** to preserve exact HU values
-
-**Why Preprocessing?**
-- CCTA has tight FOV (heart only), non-contrast has wide FOV (whole chest)
-- Without COM alignment, optimization starts far from solution
-- Gradient descent cannot escape local minimum when grossly misaligned
-
-**Why Mutual Information (MI)?**
-- Blood in non-contrast: ~40 HU
-- Blood in contrast: ~300+ HU
-- MSE/NCC would PENALIZE correct alignment!
-- MI measures statistical dependence - learns that 40 HU ↔ 300 HU
-
-**Note:** Registration parameters can be adjusted:
-- `preprocess`: Set to `true` (default) for FOV mismatch handling
-- `registration_resolution`: Lower = faster but less accurate
-- `affine_iterations`: More iterations = better alignment but slower
-- `preserve_hu`: Set to `true` for quantitative analysis (calcium scoring, dose calc)
+We will apply each preprocessing step individually and visualize the result.
 """
 
-# ╔═╡ 2e7f8a9d-0b1c-4d2e-3f4a-5b6c7d8e9f0a
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889901
+md"""
+## Step 1: Center of Mass Alignment
+
+The center of mass (COM) provides a robust estimate of where the "body" is in each image. By aligning the COMs, we get a good initial translation that brings the two images into rough alignment. This is critical because gradient-based optimization needs a reasonable starting point.
+"""
+
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889902
 begin
-	# Run clinical registration
-	# Moving: CCTA (contrast, 0.5mm-ish slices)
-	# Static: Non-contrast (3mm-ish slices)
-	println("Starting registration...")
-	println("This will take a few moments...")
+	# Compute center of mass for both images
+	com_nc = MIR.center_of_mass(nc_physical; threshold=-200f0)
+	com_ccta = MIR.center_of_mass(ccta_physical; threshold=-200f0)
 
-	registration_result = MIR.register_clinical(
-		ccta_physical, nc_physical;
-		# PREPROCESSING (NEW!)
-		preprocess=true,                   # Enable preprocessing pipeline
-		center_of_mass_init=true,          # Align centers of mass first
-		crop_to_overlap=true,              # Crop to overlapping FOV
-		window_hu=true,                    # Apply HU windowing
-		# REGISTRATION
-		registration_resolution=2.0f0,    # 2mm isotropic for optimization
-		loss_fn=MIR.mi_loss,              # Mutual Information for contrast mismatch
-		preserve_hu=true,                  # Nearest-neighbor final interpolation
-		registration_type=:affine,         # Affine registration (global transform)
-		affine_scales=(4, 2, 1),          # Multi-resolution pyramid
-		affine_iterations=(50, 25, 10),   # Iterations per scale
-		learning_rate=0.01f0,             # Optimizer learning rate
-		verbose=true                       # Print progress
-	)
+	println("Center of Mass (physical coordinates in mm):")
+	println("  Non-contrast: $(round.(com_nc, digits=1))")
+	println("  CCTA:         $(round.(com_ccta, digits=1))")
+	println()
+	println("COM difference (translation needed):")
+	com_diff = round.(com_nc .- com_ccta, digits=1)
+	println("  dx=$(com_diff[1]) mm, dy=$(com_diff[2]) mm, dz=$(com_diff[3]) mm")
 end
 
-# ╔═╡ 3f8a9b0c-1d2e-4f3a-5b6c-7d8e9f0a1b2c
-md"""
-## Registration Metrics
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889903
+begin
+	# Align CCTA center of mass to non-contrast COM
+	ccta_aligned, com_translation = MIR.align_centers(ccta_physical, nc_physical; threshold=-200f0)
 
-The registration result contains detailed metrics showing how well the alignment worked:
-- **MI before**: Mutual Information before registration
-- **MI after**: Mutual Information after registration
-- **MI improvement**: The increase in MI (higher = better alignment)
-
-A positive MI improvement indicates the registration successfully aligned the images.
-"""
-
-# ╔═╡ 4a9b0c1d-2e3f-4a5b-6c7d-8e9f0a1b2c3d
-let
-	println("=" ^ 60)
-	println("REGISTRATION METRICS")
-	println("=" ^ 60)
-	println("MI Before:      $(round(registration_result.metrics[:mi_before], digits=4))")
-	println("MI After:       $(round(registration_result.metrics[:mi_after], digits=4))")
-	println("MI Improvement: $(round(registration_result.metrics[:mi_improvement], digits=4))")
-	println()
-	println("Metadata:")
-	println("  Moving spacing: $(registration_result.metadata[:moving_spacing]) mm")
-	println("  Static spacing: $(registration_result.metadata[:static_spacing]) mm")
-	println("  Registration resolution: $(registration_result.metadata[:registration_resolution]) mm")
-	println("  Preserve HU: $(registration_result.metadata[:preserve_hu])")
-	println()
-	# Show preprocessing information if available
-	if haskey(registration_result.metadata, :preprocess_translation)
-		println("Preprocessing Applied:")
-		trans = registration_result.metadata[:preprocess_translation]
-		println("  Translation: ($(round(trans[1], digits=1)), $(round(trans[2], digits=1)), $(round(trans[3], digits=1))) mm")
-		if haskey(registration_result.metadata, :preprocess_com_moving)
-			com_m = registration_result.metadata[:preprocess_com_moving]
-			com_s = registration_result.metadata[:preprocess_com_static]
-			println("  COM Moving (CCTA): ($(round(com_m[1], digits=1)), $(round(com_m[2], digits=1)), $(round(com_m[3], digits=1))) mm")
-			println("  COM Static (NC):   ($(round(com_s[1], digits=1)), $(round(com_s[2], digits=1)), $(round(com_s[3], digits=1))) mm")
-		end
-	end
-	println("=" ^ 60)
+	println("COM alignment applied:")
+	println("  Translation: $(round.(com_translation, digits=1)) mm")
+	println("  CCTA origin before: $(round.(ccta_physical.origin, digits=1))")
+	println("  CCTA origin after:  $(round.(ccta_aligned.origin, digits=1))")
 end
 
-# ╔═╡ 5b0c1d2e-3f4a-5b6c-7d8e-9f0a1b2c3d4e
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889904
 md"""
-## HU Preservation Validation
+## Step 2: FOV Overlap Detection
 
-Since we used `preserve_hu=true`, the output image should contain ONLY values that existed in the original CCTA scan (nearest-neighbor interpolation).
-
-This is critical for:
-- **Calcium scoring** (130 HU threshold)
-- **Tissue density measurement**
-- **Dose calculation** (HU → electron density)
-
-Bilinear interpolation would create new values by averaging neighbors, corrupting quantitative analysis.
+The CCTA scan has a tight FOV (covers mostly the heart region) while the non-contrast scan has a wide FOV (covers the whole chest). We need to find the overlapping region where both scans have valid data.
 """
 
-# ╔═╡ 6c1d2e3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f
-let
-	# Get unique HU values before and after
-	original_values = Set(vec(Array(ccta_physical.data)))
-	moved_values = Set(vec(Array(registration_result.moved_image.data)))
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889905
+begin
+	# Compute physical bounds of each image
+	nc_bounds = MIR.physical_bounds(nc_physical)
+	ccta_bounds_orig = MIR.physical_bounds(ccta_physical)
+	ccta_bounds_aligned = MIR.physical_bounds(ccta_aligned)
 
-	n_original = length(original_values)
-	n_moved = length(moved_values)
-
-	hu_preserved = moved_values ⊆ original_values
-
-	println("=" ^ 60)
-	println("HU PRESERVATION VALIDATION")
-	println("=" ^ 60)
-	println("Original CCTA unique values: $(n_original)")
-	println("Registered output unique values: $(n_moved)")
+	println("Physical bounds (mm):")
 	println()
+	println("Non-contrast (static):")
+	println("  X: $(round.(nc_bounds[1], digits=1))")
+	println("  Y: $(round.(nc_bounds[2], digits=1))")
+	println("  Z: $(round.(nc_bounds[3], digits=1))")
+	println()
+	println("CCTA before alignment:")
+	println("  X: $(round.(ccta_bounds_orig[1], digits=1))")
+	println("  Y: $(round.(ccta_bounds_orig[2], digits=1))")
+	println("  Z: $(round.(ccta_bounds_orig[3], digits=1))")
+	println()
+	println("CCTA after COM alignment:")
+	println("  X: $(round.(ccta_bounds_aligned[1], digits=1))")
+	println("  Y: $(round.(ccta_bounds_aligned[2], digits=1))")
+	println("  Z: $(round.(ccta_bounds_aligned[3], digits=1))")
+end
 
-	if hu_preserved
-		println("✓ HU PRESERVATION VERIFIED")
-		println("  All output values exist in original input")
-		println("  Safe for quantitative analysis!")
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889906
+begin
+	# Detect overlapping region
+	overlap_region = MIR.compute_overlap_region(ccta_aligned, nc_physical)
+
+	if isnothing(overlap_region)
+		println("WARNING: No overlap detected! Check image positions.")
 	else
-		new_values = setdiff(moved_values, original_values)
-		println("⚠ WARNING: $(length(new_values)) new values created")
-		println("  Check interpolation settings")
-	end
+		overlap_extent = overlap_region.max .- overlap_region.min
+		println("Overlap region detected:")
+		println("  Min corner: $(round.(overlap_region.min, digits=1)) mm")
+		println("  Max corner: $(round.(overlap_region.max, digits=1)) mm")
+		println("  Extent: $(round.(overlap_extent, digits=1)) mm")
+		println()
 
+		# Compute what percentage of each image is in the overlap
+		nc_extent = MIR.physical_extent(nc_physical)
+		ccta_extent = MIR.physical_extent(ccta_aligned)
+
+		nc_overlap_pct = round.(overlap_extent ./ nc_extent .* 100, digits=0)
+		ccta_overlap_pct = round.(overlap_extent ./ ccta_extent .* 100, digits=0)
+		println("Overlap as % of each image:")
+		println("  Non-contrast: X=$(nc_overlap_pct[1])%, Y=$(nc_overlap_pct[2])%, Z=$(nc_overlap_pct[3])%")
+		println("  CCTA:         X=$(ccta_overlap_pct[1])%, Y=$(ccta_overlap_pct[2])%, Z=$(ccta_overlap_pct[3])%")
+	end
+end
+
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889907
+begin
+	# Crop both images to the overlapping region
+	nc_cropped = MIR.crop_to_overlap(nc_physical, overlap_region)
+	ccta_cropped = MIR.crop_to_overlap(ccta_aligned, overlap_region)
+
+	println("Cropped images:")
+	println("  Non-contrast: $(MIR.spatial_size(nc_physical)) -> $(MIR.spatial_size(nc_cropped))")
+	println("  CCTA:         $(MIR.spatial_size(ccta_aligned)) -> $(MIR.spatial_size(ccta_cropped))")
 	println()
-	println("Original HU range: $(extrema(Array(ccta_physical.data)))")
-	println("Output HU range:   $(extrema(Array(registration_result.moved_image.data)))")
-	println("=" ^ 60)
+	println("Cropped physical extents:")
+	println("  Non-contrast: $(round.(MIR.physical_extent(nc_cropped), digits=1)) mm")
+	println("  CCTA:         $(round.(MIR.physical_extent(ccta_cropped), digits=1)) mm")
 end
 
-# ╔═╡ 7d2e3f4a-5b6c-7d8e-9f0a-1b2c3d4e5f6a
-md"""
-## Visualize Before/After Alignment
-
-Compare the alignment before and after registration using:
-1. **Difference images** - should be smaller after registration
-2. **Checkerboard overlay** - should show smooth transitions at edges
-"""
-
-# ╔═╡ 8e3f4a5b-6c7d-8e9f-0a1b-2c3d4e5f6a7b
-"""
-Create a checkerboard overlay of two images for visual comparison.
-Helps visualize alignment - good registration shows smooth transitions at checkerboard edges.
-"""
-function checkerboard_overlay(img1, img2; block_size=16)
-	result = similar(img1)
-	X, Y = size(img1, 1), size(img1, 2)
-	for j in 1:Y, i in 1:X
-		block_x = div(i - 1, block_size)
-		block_y = div(j - 1, block_size)
-		if mod(block_x + block_y, 2) == 0
-			result[i, j] = img1[i, j]
-		else
-			result[i, j] = img2[i, j]
-		end
-	end
-	return result
-end
-
-# ╔═╡ 9f4a5b6c-7d8e-9f0a-1b2c-3d4e5f6a7b8c
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889908
 let
-	# Get middle slice for visualization
-	mid_z_nc = nc_data.size_voxels[3] ÷ 2
-	mid_z_ccta = ccta_data.size_voxels[3] ÷ 2
+	# Visualize cropped images side-by-side
+	nc_mid = MIR.spatial_size(nc_cropped)[3] ÷ 2
+	ccta_mid = MIR.spatial_size(ccta_cropped)[3] ÷ 2
 
-	# Extract slices
-	nc_slice = nc_data.volume[:, :, mid_z_nc, 1, 1]
-	ccta_slice_before = ccta_data.volume[:, :, mid_z_ccta, 1, 1]
+	nc_slice = nc_cropped.data[:, :, nc_mid, 1, 1]
+	ccta_slice = ccta_cropped.data[:, :, ccta_mid, 1, 1]
 
-	# Get the moved CCTA slice at the same z position
-	# Note: The moved image is now in the static (non-contrast) coordinate space
-	moved_slice = registration_result.moved_image.data[:, :, mid_z_nc, 1, 1]
+	fig = CM.Figure(size=(1000, 500))
 
-	# Normalize for visualization
-	normalize_for_vis(img) = clamp.((img .- (-200)) ./ (400 - (-200)), 0, 1)
+	ax1 = CM.Axis(fig[1, 1], title="Non-Contrast Cropped (slice $nc_mid)", aspect=CM.DataAspect())
+	CM.heatmap!(ax1, nc_slice', colormap=:grays, colorrange=(-200, 400))
 
-	nc_norm = normalize_for_vis(nc_slice)
-	ccta_norm = normalize_for_vis(ccta_slice_before)
-	moved_norm = normalize_for_vis(moved_slice)
+	ax2 = CM.Axis(fig[1, 2], title="CCTA Cropped (slice $ccta_mid)", aspect=CM.DataAspect())
+	CM.heatmap!(ax2, ccta_slice', colormap=:grays, colorrange=(-200, 400))
 
-	# Create checkerboards
-	checker_before = checkerboard_overlay(nc_norm, ccta_norm; block_size=32)
-	checker_after = checkerboard_overlay(nc_norm, moved_norm; block_size=32)
+	CM.Label(fig[0, :], "After FOV Overlap Crop", fontsize=18)
+	fig
+end
 
-	# Create figure
-	fig = CM.Figure(size=(1200, 800))
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889909
+md"""
+## Step 3: Resample to Common Resolution
 
-	# Top row: Original images
-	ax1 = CM.Axis(fig[1, 1], title="Non-Contrast (Static)", aspect=CM.DataAspect())
-	CM.heatmap!(ax1, nc_norm', colormap=:grays)
-	CM.hidedecorations!(ax1)
+The two images have very different resolutions, especially in z. We resample both to a common isotropic resolution (2mm) for registration. This makes the optimization tractable and ensures both images occupy the same voxel grid.
+"""
 
-	ax2 = CM.Axis(fig[1, 2], title="CCTA Before Registration", aspect=CM.DataAspect())
-	CM.heatmap!(ax2, ccta_norm', colormap=:grays)
-	CM.hidedecorations!(ax2)
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff667788990a
+begin
+	# Resample both to 2mm isotropic
+	target_spacing = (2.0f0, 2.0f0, 2.0f0)
+	nc_resampled = MIR.resample(nc_cropped, target_spacing; interpolation=:bilinear)
+	ccta_resampled = MIR.resample(ccta_cropped, target_spacing; interpolation=:bilinear)
 
-	ax3 = CM.Axis(fig[1, 3], title="CCTA After Registration", aspect=CM.DataAspect())
-	CM.heatmap!(ax3, moved_norm', colormap=:grays)
-	CM.hidedecorations!(ax3)
+	println("Resampled images (2mm isotropic):")
+	println("  Non-contrast: $(MIR.spatial_size(nc_cropped)) @ $(round.(MIR.spatial_spacing(nc_cropped), digits=2))mm")
+	println("             -> $(MIR.spatial_size(nc_resampled)) @ $(round.(MIR.spatial_spacing(nc_resampled), digits=2))mm")
+	println()
+	println("  CCTA:         $(MIR.spatial_size(ccta_cropped)) @ $(round.(MIR.spatial_spacing(ccta_cropped), digits=2))mm")
+	println("             -> $(MIR.spatial_size(ccta_resampled)) @ $(round.(MIR.spatial_spacing(ccta_resampled), digits=2))mm")
+end
 
-	# Bottom row: Checkerboard comparisons
-	ax4 = CM.Axis(fig[2, 1], title="Checkerboard: NC + CCTA (Before)", aspect=CM.DataAspect())
-	CM.heatmap!(ax4, checker_before', colormap=:grays)
-	CM.hidedecorations!(ax4)
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff667788990b
+let
+	# Visualize resampled images side-by-side
+	nc_mid = MIR.spatial_size(nc_resampled)[3] ÷ 2
+	ccta_mid = MIR.spatial_size(ccta_resampled)[3] ÷ 2
 
-	ax5 = CM.Axis(fig[2, 2], title="Checkerboard: NC + CCTA (After)", aspect=CM.DataAspect())
-	CM.heatmap!(ax5, checker_after', colormap=:grays)
-	CM.hidedecorations!(ax5)
+	nc_slice = nc_resampled.data[:, :, nc_mid, 1, 1]
+	ccta_slice = ccta_resampled.data[:, :, ccta_mid, 1, 1]
 
-	# Difference image
-	ax6 = CM.Axis(fig[2, 3], title="Abs Difference (After)", aspect=CM.DataAspect())
-	diff_img = abs.(nc_norm .- moved_norm)
-	CM.heatmap!(ax6, diff_img', colormap=:hot, colorrange=(0, 0.5))
-	CM.hidedecorations!(ax6)
+	fig = CM.Figure(size=(1000, 500))
 
-	CM.Label(fig[0, :], "Registration Results (Middle Slice)", fontsize=20)
+	ax1 = CM.Axis(fig[1, 1], title="Non-Contrast Resampled (slice $nc_mid)", aspect=CM.DataAspect())
+	CM.heatmap!(ax1, nc_slice', colormap=:grays, colorrange=(-200, 400))
+
+	ax2 = CM.Axis(fig[1, 2], title="CCTA Resampled (slice $ccta_mid)", aspect=CM.DataAspect())
+	CM.heatmap!(ax2, ccta_slice', colormap=:grays, colorrange=(-200, 400))
+
+	CM.Label(fig[0, :], "After Resampling to 2mm Isotropic", fontsize=18)
+	fig
+end
+
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff667788990c
+md"""
+## Step 4: Intensity Windowing
+
+Intensity windowing clips extreme HU values (very dense bone, metal artifacts, extreme air). This focuses the registration on the soft tissue range where alignment matters most, and reduces the influence of outliers on the loss function.
+"""
+
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff667788990d
+begin
+	# Apply HU windowing
+	nc_windowed = MIR.window_intensity(nc_resampled; min_hu=-200f0, max_hu=1000f0)
+	ccta_windowed = MIR.window_intensity(ccta_resampled; min_hu=-200f0, max_hu=1000f0)
+
+	println("Intensity windowing applied: [-200, 1000] HU")
+	println("  Non-contrast HU range: $(extrema(nc_resampled.data)) -> $(extrema(nc_windowed.data))")
+	println("  CCTA HU range:         $(extrema(ccta_resampled.data)) -> $(extrema(ccta_windowed.data))")
+end
+
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff667788990e
+let
+	# Visualize intensity histograms before/after windowing
+	fig = CM.Figure(size=(1000, 400))
+
+	# Before windowing
+	ax1 = CM.Axis(fig[1, 1], title="NC Before Windowing", xlabel="HU", ylabel="Count")
+	nc_vals_before = vec(nc_resampled.data)
+	CM.hist!(ax1, nc_vals_before, bins=100, color=(:blue, 0.5))
+
+	ax2 = CM.Axis(fig[1, 2], title="NC After Windowing [-200, 1000]", xlabel="HU", ylabel="Count")
+	nc_vals_after = vec(nc_windowed.data)
+	CM.hist!(ax2, nc_vals_after, bins=100, color=(:blue, 0.5))
+
+	ax3 = CM.Axis(fig[2, 1], title="CCTA Before Windowing", xlabel="HU", ylabel="Count")
+	ccta_vals_before = vec(ccta_resampled.data)
+	CM.hist!(ax3, ccta_vals_before, bins=100, color=(:red, 0.5))
+
+	ax4 = CM.Axis(fig[2, 2], title="CCTA After Windowing [-200, 1000]", xlabel="HU", ylabel="Count")
+	ccta_vals_after = vec(ccta_windowed.data)
+	CM.hist!(ax4, ccta_vals_after, bins=100, color=(:red, 0.5))
 
 	fig
 end
 
-# ╔═╡ 0a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff667788990f
 md"""
-## Slice-by-Slice Comparison
+## Preprocessing Summary
 
-Browse through different slices to inspect the registration quality throughout the volume.
+Overview of all preprocessing steps applied to bring the images into a common space for registration.
 """
 
-# ╔═╡ 1b6c7d8e-9f0a-1b2c-3d4e-5f6a7b8c9d0e
-@bind slice_idx UI.Slider(1:nc_data.size_voxels[3], default=44, show_value=true)
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889910
+begin
+	"""
+	Create a checkerboard overlay of two images for visual comparison.
+	Helps visualize alignment - good registration shows smooth transitions at edges.
+	"""
+	function checkerboard_overlay(img1, img2; block_size=16)
+		result = similar(img1)
+		X, Y = size(img1, 1), size(img1, 2)
+		for j in 1:Y, i in 1:X
+			block_x = div(i - 1, block_size)
+			block_y = div(j - 1, block_size)
+			if mod(block_x + block_y, 2) == 0
+				result[i, j] = img1[i, j]
+			else
+				result[i, j] = img2[i, j]
+			end
+		end
+		return result
+	end
 
-# ╔═╡ 2c7d8e9f-0a1b-2c3d-4e5f-6a7b8c9d0e1f
-let
-	# Get slices at current index
-	nc_slice = nc_data.volume[:, :, slice_idx, 1, 1]
-	moved_slice = registration_result.moved_image.data[:, :, slice_idx, 1, 1]
-
-	# Normalize for visualization
+	# Normalization helper
 	normalize_for_vis(img) = clamp.((img .- (-200)) ./ (400 - (-200)), 0, 1)
+end
 
-	nc_norm = normalize_for_vis(nc_slice)
-	moved_norm = normalize_for_vis(moved_slice)
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889911
+let
+	# Show preprocessing progression: Original -> Cropped -> Resampled for both images
+	# Use middle slices at each stage
 
-	# Checkerboard
-	checker = checkerboard_overlay(nc_norm, moved_norm; block_size=32)
+	fig = CM.Figure(size=(1200, 800))
 
-	# Create figure
-	fig = CM.Figure(size=(1000, 350))
+	# Row labels
+	CM.Label(fig[1, 0], "NC\n(Static)", fontsize=14, rotation=pi/2, tellheight=false)
+	CM.Label(fig[2, 0], "CCTA\n(Moving)", fontsize=14, rotation=pi/2, tellheight=false)
 
-	ax1 = CM.Axis(fig[1, 1], title="Non-Contrast", aspect=CM.DataAspect())
-	CM.heatmap!(ax1, nc_norm', colormap=:grays)
+	# Column labels
+	CM.Label(fig[0, 1], "Original", fontsize=16)
+	CM.Label(fig[0, 2], "Cropped to Overlap", fontsize=16)
+	CM.Label(fig[0, 3], "Resampled (2mm)", fontsize=16)
+
+	# NC original
+	nc_orig_mid = nc_data.size_voxels[3] ÷ 2
+	nc_orig_slice = nc_data.volume[:, :, nc_orig_mid, 1, 1]
+	ax1 = CM.Axis(fig[1, 1], aspect=CM.DataAspect())
+	CM.heatmap!(ax1, nc_orig_slice', colormap=:grays, colorrange=(-200, 400))
 	CM.hidedecorations!(ax1)
 
-	ax2 = CM.Axis(fig[1, 2], title="Registered CCTA", aspect=CM.DataAspect())
-	CM.heatmap!(ax2, moved_norm', colormap=:grays)
+	# NC cropped
+	nc_crop_mid = MIR.spatial_size(nc_cropped)[3] ÷ 2
+	nc_crop_slice = nc_cropped.data[:, :, nc_crop_mid, 1, 1]
+	ax2 = CM.Axis(fig[1, 2], aspect=CM.DataAspect())
+	CM.heatmap!(ax2, nc_crop_slice', colormap=:grays, colorrange=(-200, 400))
 	CM.hidedecorations!(ax2)
 
-	ax3 = CM.Axis(fig[1, 3], title="Checkerboard Overlay", aspect=CM.DataAspect())
+	# NC resampled
+	nc_res_mid = MIR.spatial_size(nc_resampled)[3] ÷ 2
+	nc_res_slice = nc_resampled.data[:, :, nc_res_mid, 1, 1]
+	ax3 = CM.Axis(fig[1, 3], aspect=CM.DataAspect())
+	CM.heatmap!(ax3, nc_res_slice', colormap=:grays, colorrange=(-200, 400))
+	CM.hidedecorations!(ax3)
+
+	# CCTA original
+	ccta_orig_mid = ccta_data.size_voxels[3] ÷ 2
+	ccta_orig_slice = ccta_data.volume[:, :, ccta_orig_mid, 1, 1]
+	ax4 = CM.Axis(fig[2, 1], aspect=CM.DataAspect())
+	CM.heatmap!(ax4, ccta_orig_slice', colormap=:grays, colorrange=(-200, 400))
+	CM.hidedecorations!(ax4)
+
+	# CCTA cropped
+	ccta_crop_mid = MIR.spatial_size(ccta_cropped)[3] ÷ 2
+	ccta_crop_slice = ccta_cropped.data[:, :, ccta_crop_mid, 1, 1]
+	ax5 = CM.Axis(fig[2, 2], aspect=CM.DataAspect())
+	CM.heatmap!(ax5, ccta_crop_slice', colormap=:grays, colorrange=(-200, 400))
+	CM.hidedecorations!(ax5)
+
+	# CCTA resampled
+	ccta_res_mid = MIR.spatial_size(ccta_resampled)[3] ÷ 2
+	ccta_res_slice = ccta_resampled.data[:, :, ccta_res_mid, 1, 1]
+	ax6 = CM.Axis(fig[2, 3], aspect=CM.DataAspect())
+	CM.heatmap!(ax6, ccta_res_slice', colormap=:grays, colorrange=(-200, 400))
+	CM.hidedecorations!(ax6)
+
+	CM.Label(fig[-1, :], "Preprocessing Pipeline: Original → Cropped → Resampled", fontsize=20)
+	fig
+end
+
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889912
+let
+	# Checkerboard of preprocessed pair (should show rough alignment from COM)
+	nc_mid = MIR.spatial_size(nc_windowed)[3] ÷ 2
+	ccta_mid = MIR.spatial_size(ccta_windowed)[3] ÷ 2
+
+	nc_slice = normalize_for_vis(nc_windowed.data[:, :, nc_mid, 1, 1])
+	ccta_slice = normalize_for_vis(ccta_windowed.data[:, :, ccta_mid, 1, 1])
+
+	# Images may have different sizes - use the smaller dimensions
+	min_x = min(size(nc_slice, 1), size(ccta_slice, 1))
+	min_y = min(size(nc_slice, 2), size(ccta_slice, 2))
+	nc_trimmed = nc_slice[1:min_x, 1:min_y]
+	ccta_trimmed = ccta_slice[1:min_x, 1:min_y]
+
+	checker = checkerboard_overlay(nc_trimmed, ccta_trimmed; block_size=16)
+
+	fig = CM.Figure(size=(1000, 400))
+
+	ax1 = CM.Axis(fig[1, 1], title="NC Preprocessed", aspect=CM.DataAspect())
+	CM.heatmap!(ax1, nc_trimmed', colormap=:grays)
+	CM.hidedecorations!(ax1)
+
+	ax2 = CM.Axis(fig[1, 2], title="CCTA Preprocessed", aspect=CM.DataAspect())
+	CM.heatmap!(ax2, ccta_trimmed', colormap=:grays)
+	CM.hidedecorations!(ax2)
+
+	ax3 = CM.Axis(fig[1, 3], title="Checkerboard (Preprocessed)", aspect=CM.DataAspect())
 	CM.heatmap!(ax3, checker', colormap=:grays)
 	CM.hidedecorations!(ax3)
 
-	CM.Label(fig[0, :], "Slice $slice_idx of $(nc_data.size_voxels[3])", fontsize=16)
+	CM.Label(fig[0, :], "Preprocessed Images - Rough Alignment from COM", fontsize=18)
+	fig
+end
+
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889913
+md"""
+## Slice Browser (Preprocessed)
+
+Browse through slices of the preprocessed images to inspect the alignment quality after preprocessing (before registration).
+"""
+
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889914
+@bind preprocess_slice_idx UI.Slider(1:min(MIR.spatial_size(nc_windowed)[3], MIR.spatial_size(ccta_windowed)[3]), default=min(MIR.spatial_size(nc_windowed)[3], MIR.spatial_size(ccta_windowed)[3]) ÷ 2, show_value=true)
+
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889915
+let
+	nc_slice = normalize_for_vis(nc_windowed.data[:, :, preprocess_slice_idx, 1, 1])
+	ccta_slice = normalize_for_vis(ccta_windowed.data[:, :, preprocess_slice_idx, 1, 1])
+
+	# Handle potentially different sizes
+	min_x = min(size(nc_slice, 1), size(ccta_slice, 1))
+	min_y = min(size(nc_slice, 2), size(ccta_slice, 2))
+	nc_trimmed = nc_slice[1:min_x, 1:min_y]
+	ccta_trimmed = ccta_slice[1:min_x, 1:min_y]
+
+	checker = checkerboard_overlay(nc_trimmed, ccta_trimmed; block_size=16)
+
+	fig = CM.Figure(size=(1000, 350))
+
+	ax1 = CM.Axis(fig[1, 1], title="Non-Contrast", aspect=CM.DataAspect())
+	CM.heatmap!(ax1, nc_trimmed', colormap=:grays)
+	CM.hidedecorations!(ax1)
+
+	ax2 = CM.Axis(fig[1, 2], title="CCTA (Preprocessed)", aspect=CM.DataAspect())
+	CM.heatmap!(ax2, ccta_trimmed', colormap=:grays)
+	CM.hidedecorations!(ax2)
+
+	ax3 = CM.Axis(fig[1, 3], title="Checkerboard", aspect=CM.DataAspect())
+	CM.heatmap!(ax3, checker', colormap=:grays)
+	CM.hidedecorations!(ax3)
+
+	nc_z_total = MIR.spatial_size(nc_windowed)[3]
+	CM.Label(fig[0, :], "Preprocessed Slice $preprocess_slice_idx of $nc_z_total", fontsize=16)
 
 	fig
 end
 
-# ╔═╡ 3d8e9f0a-1b2c-3d4e-5f6a-7b8c9d0e1f2a
+# ╔═╡ aa11bb22-cc33-dd44-ee55-ff6677889916
 md"""
 ## Summary
 
-This notebook demonstrated the complete clinical CT registration workflow:
+This notebook demonstrated the preprocessing pipeline for clinical cardiac CT registration:
 
-1. **Loaded DICOM series** using DICOM.jl and converted to HU values
-2. **Created PhysicalImage objects** with correct spacing metadata
-3. **Registered with Mutual Information** to handle contrast vs non-contrast intensity mismatch
-4. **Preserved HU values** using nearest-neighbor interpolation for the final output
-5. **Validated registration** with metrics and visualizations
+| Step | What it Does | Why it Matters |
+|------|-------------|----------------|
+| **1. COM Alignment** | Translates CCTA to align body centers | Gets images roughly overlapping |
+| **2. FOV Overlap** | Finds region where both scans have data | CCTA FOV is smaller than non-contrast |
+| **3. Resampling** | Brings both to 2mm isotropic grid | Needed for optimization (same voxel grid) |
+| **4. Windowing** | Clips to [-200, 1000] HU | Focuses on tissue, removes extreme artifacts |
 
-### Key Points for Clinical CT Registration
+After preprocessing, the images are ready for registration (see next notebook section).
 
-| Challenge | Solution |
-|-----------|----------|
-| **FOV mismatch** (tight CCTA vs wide chest FOV) | `preprocess=true` with COM alignment |
-| **Resolution mismatch** (3mm vs 0.5mm) | Register at common resolution (2mm), upsample transform |
-| **Contrast intensity difference** (40 HU vs 300 HU blood) | Mutual Information loss |
-| **HU preservation for quantitative analysis** | `preserve_hu=true` (nearest-neighbor) |
-
-### When to Use Different Settings
-
-| Use Case | Loss Function | Preserve HU |
-|----------|--------------|-------------|
-| Same-modality (CT to CT, no contrast) | `mse_loss` | Depends on analysis |
-| Multi-modal (contrast vs non-contrast) | `mi_loss` | Yes for quantitative |
-| Visual alignment only | `mse_loss` or `mi_loss` | No (bilinear is smoother) |
-| Calcium scoring, dose calculation | `mi_loss` | **Always yes** |
+**Next steps** (NOTEBOOK-REGISTER-VIS-001):
+- Run affine registration with MI loss on the preprocessed images
+- Apply learned transform to original high-res CCTA with nearest-neighbor for HU preservation
+- Validate results
 """
 
 # ╔═╡ Cell order:
@@ -685,22 +766,29 @@ This notebook demonstrated the complete clinical CT registration workflow:
 # ╠═1b8f0793-5728-4b17-93fe-7249c1cd3638
 # ╟─fe28b08c-f926-404e-b273-5fad4f4734d1
 # ╟─778ef6f5-501d-4c85-9dbd-5432aa4bed21
-# ╟─e536974f-8e81-4ac6-b8cc-c1c0d28c36d2
-# ╠═1f83def0-ee53-4c2c-979e-dd36d4197746
-# ╠═170936b5-e78e-431d-8687-a860d95769ac
 # ╟─8a3f2d1e-5b6c-4d8a-9e7f-1a2b3c4d5e6f
 # ╠═9b4e5f6a-7c8d-4e9a-0f1a-2b3c4d5e6f7a
 # ╠═0c5d6e7b-8f9a-4b0c-1d2e-3f4a5b6c7d8e
-# ╟─1d6e7f8c-9a0b-4c1d-2e3f-4a5b6c7d8e9f
-# ╠═2e7f8a9d-0b1c-4d2e-3f4a-5b6c7d8e9f0a
-# ╟─3f8a9b0c-1d2e-4f3a-5b6c-7d8e9f0a1b2c
-# ╠═4a9b0c1d-2e3f-4a5b-6c7d-8e9f0a1b2c3d
-# ╟─5b0c1d2e-3f4a-5b6c-7d8e-9f0a1b2c3d4e
-# ╠═6c1d2e3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f
-# ╟─7d2e3f4a-5b6c-7d8e-9f0a-1b2c3d4e5f6a
-# ╠═8e3f4a5b-6c7d-8e9f-0a1b-2c3d4e5f6a7b
-# ╟─9f4a5b6c-7d8e-9f0a-1b2c-3d4e5f6a7b8c
-# ╟─0a5b6c7d-8e9f-0a1b-2c3d-4e5f6a7b8c9d
-# ╟─1b6c7d8e-9f0a-1b2c-3d4e-5f6a7b8c9d0e
-# ╟─2c7d8e9f-0a1b-2c3d-4e5f-6a7b8c9d0e1f
-# ╟─3d8e9f0a-1b2c-3d4e-5f6a-7b8c9d0e1f2a
+# ╟─aa11bb22-cc33-dd44-ee55-ff6677889900
+# ╟─aa11bb22-cc33-dd44-ee55-ff6677889901
+# ╠═aa11bb22-cc33-dd44-ee55-ff6677889902
+# ╠═aa11bb22-cc33-dd44-ee55-ff6677889903
+# ╟─aa11bb22-cc33-dd44-ee55-ff6677889904
+# ╠═aa11bb22-cc33-dd44-ee55-ff6677889905
+# ╠═aa11bb22-cc33-dd44-ee55-ff6677889906
+# ╠═aa11bb22-cc33-dd44-ee55-ff6677889907
+# ╟─aa11bb22-cc33-dd44-ee55-ff6677889908
+# ╟─aa11bb22-cc33-dd44-ee55-ff6677889909
+# ╠═aa11bb22-cc33-dd44-ee55-ff667788990a
+# ╟─aa11bb22-cc33-dd44-ee55-ff667788990b
+# ╟─aa11bb22-cc33-dd44-ee55-ff667788990c
+# ╠═aa11bb22-cc33-dd44-ee55-ff667788990d
+# ╟─aa11bb22-cc33-dd44-ee55-ff667788990e
+# ╟─aa11bb22-cc33-dd44-ee55-ff667788990f
+# ╠═aa11bb22-cc33-dd44-ee55-ff6677889910
+# ╟─aa11bb22-cc33-dd44-ee55-ff6677889911
+# ╟─aa11bb22-cc33-dd44-ee55-ff6677889912
+# ╟─aa11bb22-cc33-dd44-ee55-ff6677889913
+# ╠═aa11bb22-cc33-dd44-ee55-ff6677889914
+# ╟─aa11bb22-cc33-dd44-ee55-ff6677889915
+# ╟─aa11bb22-cc33-dd44-ee55-ff6677889916
