@@ -240,10 +240,9 @@ diffeomorphic_transform(velocity; time_steps=7)  # Scaling-and-squaring
 
 ## Dependencies
 
+- [AcceleratedKernels.jl](https://github.com/JuliaGPU/AcceleratedKernels.jl) - GPU acceleration (CPU/CUDA/Metal/ROCm)
 - [Mooncake.jl](https://github.com/compintell/Mooncake.jl) - Automatic differentiation
-- [AcceleratedKernels.jl](https://github.com/JuliaGPU/AcceleratedKernels.jl) - GPU acceleration (CPU/CUDA/Metal)
-- [Optimisers.jl](https://github.com/FluxML/Optimisers.jl) - Optimization algorithms
-- [NNlib.jl](https://github.com/FluxML/NNlib.jl) - Batched matrix operations
+- [Atomix.jl](https://github.com/JuliaGPU/Atomix.jl) - Atomic operations for GPU
 
 ## License
 
