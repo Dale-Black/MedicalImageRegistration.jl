@@ -386,4 +386,141 @@ const ArrayType = USE_GPU ? MtlArray : Array
         @test result.metadata[:preserve_hu] == true
     end
 
+    @testset "register_clinical with preprocessing" begin
+        Random.seed!(42)
+
+        T = Float32
+
+        # Create images simulating cardiac CT scenario with FOV mismatch
+        # Static: wide FOV
+        static_data = ArrayType(fill(T(-500), 64, 64, 32, 1, 1))
+        static_cpu = fill(T(-500), 64, 64, 32, 1, 1)
+        static_cpu[25:40, 25:40, 12:20, 1, 1] .= T(200)  # Soft tissue blob
+        copyto!(static_data, static_cpu)
+
+        static = PhysicalImage(static_data;
+            spacing=(1.0f0, 1.0f0, 2.0f0),
+            origin=(-32.0f0, -32.0f0, 0.0f0)
+        )
+
+        # Moving: tight FOV, offset
+        moving_data = ArrayType(fill(T(-500), 50, 50, 25, 1, 1))
+        moving_cpu = fill(T(-500), 50, 50, 25, 1, 1)
+        moving_cpu[25:38, 25:38, 10:18, 1, 1] .= T(200)  # Soft tissue blob, offset
+        copyto!(moving_data, moving_cpu)
+
+        moving = PhysicalImage(moving_data;
+            spacing=(1.0f0, 1.0f0, 1.5f0),
+            origin=(-20.0f0, -20.0f0, 5.0f0)
+        )
+
+        # Test with preprocessing enabled (default)
+        result = register_clinical(
+            moving, static;
+            preprocess=true,
+            center_of_mass_init=true,
+            crop_to_overlap=true,
+            window_hu=true,
+            registration_resolution=2.0f0,
+            registration_type=:affine,
+            affine_scales=(2, 1),
+            affine_iterations=(15, 10),
+            verbose=false
+        )
+
+        # Verify preprocessing was applied
+        @test result.metadata[:preprocess] == true
+        @test result.metadata[:center_of_mass_init] == true
+        @test haskey(result.metadata, :preprocess_translation)
+        @test haskey(result.metadata, :preprocess_com_moving)
+        @test haskey(result.metadata, :preprocess_com_static)
+
+        # Verify translation is non-zero (images were offset)
+        translation = result.metadata[:preprocess_translation]
+        @test any(abs.(translation) .> 0.1)
+
+        # Verify registration ran and produced metrics
+        @test haskey(result.metrics, :mi_before)
+        @test haskey(result.metrics, :mi_after)
+        @test haskey(result.metrics, :mi_improvement)
+
+        # Verify output has correct size (original moving size)
+        @test size(result.moved_image.data) == size(moving.data)
+    end
+
+    @testset "register_clinical without preprocessing" begin
+        Random.seed!(42)
+
+        T = Float32
+        X, Y, Z, C, N = 16, 16, 16, 1, 1
+
+        moving_data = ArrayType(randn(T, X, Y, Z, C, N))
+        static_data = ArrayType(randn(T, X, Y, Z, C, N))
+
+        moving = PhysicalImage(moving_data; spacing=(1.0f0, 1.0f0, 1.0f0))
+        static = PhysicalImage(static_data; spacing=(1.0f0, 1.0f0, 1.0f0))
+
+        # Test with preprocessing disabled
+        result = register_clinical(
+            moving, static;
+            preprocess=false,
+            registration_resolution=2.0f0,
+            registration_type=:affine,
+            affine_scales=(2,),
+            affine_iterations=(5,),
+            verbose=false
+        )
+
+        # Verify preprocessing was not applied
+        @test result.metadata[:preprocess] == false
+        @test !haskey(result.metadata, :preprocess_translation)
+
+        # Verify registration still works
+        @test result isa MedicalImageRegistration.ClinicalRegistrationResult
+        @test haskey(result.metrics, :mi_before)
+        @test haskey(result.metrics, :mi_after)
+    end
+
+    @testset "register_clinical 2D with preprocessing" begin
+        Random.seed!(42)
+
+        T = Float32
+
+        # Create 2D images with FOV mismatch
+        static_data = ArrayType(fill(T(-500), 64, 64, 1, 1))
+        static_cpu = fill(T(-500), 64, 64, 1, 1)
+        static_cpu[25:40, 25:40, 1, 1] .= T(200)
+        copyto!(static_data, static_cpu)
+
+        static = PhysicalImage(static_data;
+            spacing=(1.0f0, 1.0f0),
+            origin=(-32.0f0, -32.0f0)
+        )
+
+        moving_data = ArrayType(fill(T(-500), 50, 50, 1, 1))
+        moving_cpu = fill(T(-500), 50, 50, 1, 1)
+        moving_cpu[25:38, 25:38, 1, 1] .= T(200)
+        copyto!(moving_data, moving_cpu)
+
+        moving = PhysicalImage(moving_data;
+            spacing=(1.0f0, 1.0f0),
+            origin=(-20.0f0, -20.0f0)
+        )
+
+        result = register_clinical(
+            moving, static;
+            preprocess=true,
+            center_of_mass_init=true,
+            registration_resolution=2.0f0,
+            registration_type=:affine,
+            affine_scales=(2,),
+            affine_iterations=(5,),
+            verbose=false
+        )
+
+        @test result.metadata[:preprocess] == true
+        @test haskey(result.metadata, :preprocess_translation)
+        @test size(result.moved_image.data) == size(moving.data)
+    end
+
 end

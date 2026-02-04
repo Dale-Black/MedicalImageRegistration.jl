@@ -685,7 +685,7 @@
       "id": "IMPL-REGISTER-PIPELINE-001",
       "type": "IMPL",
       "title": "Implement complete registration pipeline with preprocessing",
-      "status": "pending",
+      "status": "done",
       "priority": 30,
       "blockedBy": ["IMPL-PREPROCESS-001"],
       "description": "Update register_clinical() to include preprocessing pipeline. The current version throws raw images at registration. New version: 1) preprocess (align centers, resample), 2) register at low res, 3) refine at higher res, 4) apply to original with HU preservation.",

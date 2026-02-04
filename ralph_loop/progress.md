@@ -6997,3 +6997,94 @@ Integration: Cardiac CT Scenario |   14     14
 4. **Size differences after preprocessing**: Due to rounding in resampling calculations, preprocessed images may differ by 1-2 voxels. This is acceptable since registration handles minor size differences.
 
 ---
+
+## [IMPL-REGISTER-PIPELINE-001] Implement complete registration pipeline with preprocessing
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+### Implementation Summary
+
+Updated `register_clinical()` to include the preprocessing pipeline. The function now:
+1. Calls `preprocess_for_registration()` first (when `preprocess=true`)
+2. Handles size mismatches after preprocessing
+3. Returns original moving image transformed (not preprocessed)
+
+### Key Changes to src/clinical.jl
+
+#### New Keyword Arguments
+- `preprocess::Bool=true`: Enable/disable preprocessing pipeline
+- `center_of_mass_init::Bool=true`: Align centers of mass
+- `crop_to_overlap::Bool=true`: Crop to overlapping FOV
+- `window_hu::Bool=true`: Apply HU windowing
+- `min_hu::Real=-200`: Minimum HU for windowing
+- `max_hu::Real=1000`: Maximum HU for windowing
+- `com_threshold::Real=-200`: Threshold for COM computation
+
+#### Updated Workflow
+```
+Step 1: PREPROCESSING (if preprocess=true)
+  - Compute centers of mass for both images
+  - Align moving COM to static COM
+  - Detect overlapping FOV region
+  - Crop both to overlap
+  - Resample to registration_resolution
+  - Apply HU windowing
+  - Ensure matching sizes (resample if needed)
+
+Step 2: REGISTRATION
+  - Run affine or SyN at low resolution
+
+Step 3: UPSAMPLE
+  - Upsample transform to original moving resolution
+
+Step 4: APPLY
+  - Apply transform to ORIGINAL moving image
+  - Use nearest-neighbor for HU preservation
+```
+
+#### Verbose Output
+The function now prints detailed preprocessing information:
+```
+════════════════════════════════════════════════════════════
+Clinical Registration Workflow
+════════════════════════════════════════════════════════════
+Moving image: (50, 50, 25), spacing=(1.0f0, 1.0f0, 1.5f0) mm
+Static image: (64, 64, 32), spacing=(1.0f0, 1.0f0, 2.0f0) mm
+...
+Step 1: Preprocessing (COM alignment, overlap detection, resampling)
+────────────────────────────────────────────────────────────
+  COM moving: (9.0, 9.0, 24.5) mm
+  COM static: (-0.5, -0.5, 30.0) mm
+  Translation applied: (-9.5, -9.5, 5.5) mm
+  Overlap region: (49.0, 49.0, 36.0) mm
+  Preprocessed size: (25, 25, 19, 1, 1)
+  Size adjustment: moving (25, 25, 19) → static (26, 26, 19)
+```
+
+### Test Results
+
+Added new tests for preprocessing integration:
+- `register_clinical with preprocessing`: Tests FOV mismatch scenario
+- `register_clinical without preprocessing`: Tests backward compatibility
+- `register_clinical 2D with preprocessing`: Tests 2D preprocessing
+
+All tests pass:
+```
+Test Summary: | Pass  Total  
+clinical.jl   |   53     53  
+```
+
+### Why This Matters
+
+Without preprocessing, registration fails on clinical CT with FOV mismatch:
+- CCTA (tight FOV, 180mm) vs Non-contrast (wide FOV, 350mm)
+- Images start in different physical spaces
+- Gradient descent cannot find solution from grossly misaligned starting point
+
+With preprocessing:
+- COM alignment brings images close together
+- Overlap detection ensures valid registration region
+- Optimization can now converge to good solution
+
+---
