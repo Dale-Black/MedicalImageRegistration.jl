@@ -5153,3 +5153,174 @@ For the cardiac CT use case (3mm non-contrast vs 0.5mm contrast):
 - MSE would be MAXIMIZED at correct alignment (wrong!)
 - MI measures statistical dependence - learns that 40 HU always maps to 300 HU
 
+
+---
+
+### [IMPL-PHYSICAL-001] Implement physical coordinate handling and spacing-aware grids
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+---
+
+## Implementation Summary
+
+Implemented physical coordinate support for anisotropic voxels. This enables proper registration of images with different spacing (e.g., 3mm vs 0.5mm cardiac CT scans) by working in physical (mm) coordinates instead of normalized [-1, 1] coordinates.
+
+## Key Files Created
+- `src/physical.jl` - Main implementation (~900 lines)
+- `test/test_physical.jl` - Comprehensive test suite (64 tests)
+
+## Features Implemented
+
+### PhysicalImage{T, N} Type
+
+Wraps image data with spatial metadata:
+
+```julia
+struct PhysicalImage{T, N, A<:AbstractArray{T,N}}
+    data::A                    # Image array (X, Y, [Z], C, N)
+    spacing::NTuple{3, T}      # Voxel spacing in mm
+    origin::NTuple{3, T}       # Physical position of first voxel
+end
+
+# Constructors
+img_2d = PhysicalImage(data_4d; spacing=(0.5, 0.5))
+img_3d = PhysicalImage(data_5d; spacing=(0.5, 0.5, 3.0), origin=(0, 0, 0))
+```
+
+### Coordinate Transformation Functions
+
+```julia
+# Voxel (1-indexed) to physical (mm)
+x_mm, y_mm, z_mm = voxel_to_physical(img, i, j, k)
+
+# Physical (mm) to voxel (fractional)
+i, j, k = physical_to_voxel(img, x_mm, y_mm, z_mm)
+
+# Voxel to normalized [-1, 1]
+x_norm, y_norm, z_norm = voxel_to_normalized(img, i, j, k)
+
+# Query physical extent and bounds
+extent = physical_extent(img)  # (ex, ey, ez) in mm
+bounds = physical_bounds(img)  # ((x_min, x_max), (y_min, y_max), (z_min, z_max))
+```
+
+### Spacing-Aware Affine Grid (affine_grid_physical)
+
+Generates sampling grids that account for anisotropic voxel spacing:
+
+```julia
+# Standard affine_grid assumes isotropic voxels - WRONG for 3mm vs 0.5mm
+grid_wrong = affine_grid(theta, (64, 64, 100))
+
+# affine_grid_physical uses physical coordinates - CORRECT
+grid_correct = affine_grid_physical(theta, (64, 64, 100), (0.5f0, 0.5f0, 3.0f0))
+
+# Or with PhysicalImage directly
+grid = affine_grid_physical(theta, img)
+```
+
+**Why this matters:** For cardiac CT with 3mm z-spacing, a "10 voxel displacement" in z means 30mm physical displacement. Without spacing awareness, registration produces geometrically incorrect results.
+
+### Resampling to Different Spacing
+
+Resample images to target spacing while preserving physical extent:
+
+```julia
+# Original: 128x128x200 @ 0.5mm x 0.5mm x 0.5mm
+img = PhysicalImage(data; spacing=(0.5f0, 0.5f0, 0.5f0))
+
+# Resample to 2mm isotropic for faster registration
+img_lowres = resample(img, (2.0f0, 2.0f0, 2.0f0))  # ~32x32x50
+
+# Resample with nearest-neighbor for HU preservation
+img_hu = resample(img, target_spacing; interpolation=:nearest)
+```
+
+### Mooncake rrule!! for Gradients
+
+Custom backward passes using AK.foreachindex for GPU acceleration:
+
+```julia
+# Callable structs for differentiable spacing-aware grids
+AffineGridPhysical2D{T}(spacing)
+AffineGridPhysical3D{T}(spacing)
+
+# Marked as Mooncake primitives with custom rrule!!
+@is_primitive MinimalCtx Tuple{AffineGridPhysical2D, AbstractArray{<:Any,3}, NTuple{2,Int}}
+@is_primitive MinimalCtx Tuple{AffineGridPhysical3D, AbstractArray{<:Any,3}, NTuple{3,Int}}
+```
+
+## GPU Compatibility Fixes
+
+The initial implementation had GPU compilation errors due to non-bitstype closures. Fixed by:
+
+1. **Avoiding variable reassignment**: Changed `max_extent = max_extent > 0 ? ... : ...` to `max_extent = max(max_extent_raw, one(T))`
+
+2. **Pre-computing constants outside kernels**: All normalization factors computed before `AK.foreachindex`
+
+3. **Extracting tuple elements**: Tuples passed as separate scalar arguments to kernels
+
+4. **Using `max()` instead of ternary**: `max(X-1, 1)` instead of `X > 1 ? X-1 : 1`
+
+## Test Results
+
+All 64 tests pass, including:
+
+```
+PhysicalImage Construction:           13/13 ✓
+Physical Extent and Bounds:            8/8 ✓
+Coordinate Transformations:           15/15 ✓
+affine_grid_physical:                  8/8 ✓
+resample:                              8/8 ✓
+Convenience functions:                 4/4 ✓
+GPU Tests (Metal):                     8/8 ✓
+```
+
+## Acceptance Criteria Status
+
+- ✓ `src/physical.jl` with `PhysicalImage{T,N}` struct wrapping (data, spacing, origin)
+- ✓ `PhysicalImage` stores: data array (X,Y,Z,C,N), spacing tuple (mm), origin tuple (mm)
+- ✓ Constructor: `PhysicalImage(data; spacing=(1,1,1), origin=(0,0,0))`
+- ✓ `affine_grid_physical(theta, image::PhysicalImage)` - generates grid in physical coordinates
+- ✓ Grid accounts for anisotropic spacing (a 1mm translation in z = 2 voxels at 0.5mm spacing)
+- ✓ `grid_sample` works with `PhysicalImage`, respecting spacing (via grid generation)
+- ✓ `resample(image::PhysicalImage, target_spacing)` - resample to new spacing
+- ✓ Resample uses spacing-aware grid internally
+- ✓ Mooncake `rrule!!` for all new differentiable operations
+- ✓ Works on MtlArrays with `AK.foreachindex`
+- ✓ Test: Create `PhysicalImage` with anisotropic spacing, verify grid is correct
+- ✓ Test: Affine transform accounts for spacing difference
+- ✓ Test: Resample roundtrip preserves approximate shape/values
+
+## Example: Cardiac CT Registration
+
+```julia
+using MedicalImageRegistration
+using Metal
+
+# Static: 3mm slices, non-contrast
+static_data = MtlArray(rand(Float32, 512, 512, 100, 1, 1))
+img_static = PhysicalImage(static_data; spacing=(0.5f0, 0.5f0, 3.0f0))
+
+# Moving: 0.5mm slices, contrast-enhanced  
+moving_data = MtlArray(rand(Float32, 512, 512, 600, 1, 1))
+img_moving = PhysicalImage(moving_data; spacing=(0.4f0, 0.4f0, 0.5f0))
+
+# Both cover similar z-range in physical space:
+# Static:  (100-1) × 3.0 = 297 mm
+# Moving:  (600-1) × 0.5 = 299.5 mm
+
+# Resample both to 2mm for registration
+static_reg = resample(img_static, (2.0f0, 2.0f0, 2.0f0))
+moving_reg = resample(img_moving, (2.0f0, 2.0f0, 2.0f0))
+
+# Generate spacing-aware grids for transforms
+theta = MtlArray(...)  # Affine matrix (3, 4, 1)
+grid = affine_grid_physical(theta, img_static)
+
+# Grid correctly handles 6x z-spacing difference
+```
+
+---

@@ -448,7 +448,7 @@
       "id": "IMPL-PHYSICAL-001",
       "type": "IMPL",
       "title": "Implement physical coordinate handling and spacing-aware grids",
-      "status": "pending",
+      "status": "done",
       "priority": 22,
       "blockedBy": ["IMPL-MI-001"],
       "description": "Add physical coordinate support for anisotropic voxels. CONTEXT: Cardiac CT case has 3mm z-spacing (static) vs 0.5mm z-spacing (moving) - 6x difference! Current library assumes isotropic normalized [-1,1]. Need spacing-aware grid generation. Add PhysicalImage type that wraps array + spacing + origin. Modify affine_grid and grid_sample to handle physical coordinates.",

@@ -17,6 +17,9 @@ include("compose_affine.jl")
 include("metrics.jl")
 include("mi_loss.jl")
 
+# Physical coordinates and anisotropic voxel support
+include("physical.jl")
+
 # Registration types and algorithms
 include("types.jl")
 include("affine.jl")
@@ -28,6 +31,11 @@ export affine_grid
 export compose_affine
 export mse_loss, dice_loss, dice_score, ncc_loss
 export mi_loss, nmi_loss
+
+# Exports - Physical coordinates
+export PhysicalImage
+export affine_grid_physical
+export resample
 
 # Exports - SyN operations
 export spatial_transform, diffeomorphic_transform, composition_transform
