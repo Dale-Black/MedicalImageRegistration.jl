@@ -7413,3 +7413,141 @@ All paths use `joinpath(@__DIR__, ...)` relative to notebook directory ✓
 **PASS** - The notebook is correct. All API calls match function signatures, variable flow is valid for Pluto reactivity, PhysicalImage constructors use correct keyword arguments, cell order is logical, and no hardcoded paths exist. The notebook tells a clear story: Load → Preprocess (visible) → Register (visible) → Validate.
 
 ---
+
+## [DIAG-DATA-001] Diagnose: Actually inspect the DICOM data and compute FOV overlap
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+### DICOM Data Inspection Results
+
+#### Non-Contrast (Ca Score VMI 70)
+- **Series description**: CA SCORING MONO 70 Qr36 Q2 BestDiast 75%
+- **Matrix**: 512 × 512 × 71 slices
+- **Pixel spacing**: 0.3609 × 0.3609 mm (XY), 2.0 mm (Z)
+- **SliceThickness**: 2.0 mm
+- **Origin**: (-81.25, -285.95, 1723.46) mm
+- **Physical extent**: 184.76 × 184.76 × 140.0 mm
+- **Orientation**: [1,0,0, 0,1,0] (standard axial)
+- **HU range (middle slice)**: -1039 to 2295
+
+#### CCTA (Contrast Mono 70)
+- **Series description**: VMI 70
+- **Matrix**: 512 × 512 × 403 slices
+- **Pixel spacing**: 0.3609 × 0.3609 mm (XY), 0.361 mm (Z)
+- **SliceThickness**: 0.361 mm
+- **Origin**: (-81.25, -285.93, 1720.97) mm
+- **Physical extent**: 184.76 × 184.76 × 145.06 mm
+- **Orientation**: [1,0,0, 0,1,0] (standard axial)
+- **HU range (middle slice)**: -1066 to 2568
+
+### Key Finding 1: FOVs are the SAME
+
+The user was correct - the FOVs are essentially identical:
+- **XY FOV**: Both exactly 184.76 × 184.76 mm (0.0% difference)
+- **Z FOV**: NC=140.0 mm, CCTA=145.06 mm (3.5% difference, CCTA slightly larger)
+- **Same pixel matrix**: Both 512 × 512 in XY
+- **Same orientation**: Both standard axial [1,0,0, 0,1,0]
+
+### Key Finding 2: Origins are CLOSE (already scanner-aligned)
+
+- **Origin difference**: X=0.0 mm, Y=-0.02 mm, Z=2.5 mm
+- **Total distance**: 2.5 mm
+- The images are **already in the same physical coordinate space** from the DICOM scanner
+- The 2.5mm Z-offset is just because CCTA coverage starts ~2.5mm earlier
+
+### Key Finding 3: Overlap is near-complete
+
+- **X overlap**: 99.8% of both images
+- **Y overlap**: 99.8% of both images
+- **Z overlap**: 100% of NC, 96.5% of CCTA
+- **COM alignment and FOV cropping are UNNECESSARY** for this data
+
+### Key Finding 4: Resolution mismatch is only in Z
+
+- **XY spacing**: Both 0.3609 mm (identical)
+- **Z spacing**: NC=2.0 mm, CCTA=0.361 mm (5.5x ratio)
+- Resampling to 2mm isotropic: NC → 93×93×71, CCTA → 93×93×74
+
+### The REAL ROOT CAUSE: Hardcoded MSE gradients in affine.jl
+
+**CRITICAL BUG in `src/affine.jl:300-327`**
+
+The function `_compute_loss_and_gradient!` ALWAYS computes MSE gradients regardless of what `loss_fn` is:
+
+```julia
+function _compute_loss_and_gradient!(d_moved, moved, static, loss_fn)
+    loss_arr = loss_fn(moved, static)  # ← Forward uses actual loss_fn (MI)
+
+    # But gradient is HARDCODED as MSE!
+    n = T(length(moved))
+    scale = T(2) / n
+    AK.foreachindex(d_moved) do idx
+        d_moved[idx] = scale * (moved[idx] - static[idx])  # ← ALWAYS MSE gradient!
+    end
+
+    return loss_val
+end
+```
+
+**Why this breaks everything:**
+1. MI loss forward pass returns a meaningful MI value
+2. But the gradient passed to `_compute_gradients!` is the MSE gradient
+3. MSE gradient = `2*(moved - static)/n` - this points toward making images identical
+4. For multi-modal (contrast vs non-contrast), MSE gradient points in the WRONG direction
+5. The optimizer follows these wrong gradients, and the MI loss INCREASES
+
+**Evidence from test:**
+- Running affine registration with MI loss on a known shifted pair:
+  - First loss: -0.0475, Last loss: -0.027 → **LOSS INCREASED** (wrong direction!)
+  - Learned translation: [0.085, 0.103, 0.025] vs expected [-0.26, -0.17, 0]
+- Even MSE registration fails: First=22891, Last=45546 → **LOSS ALSO INCREASED**
+  - This suggests the MSE gradient chain through grid_sample backward may also have issues
+
+### Secondary Issue: MI loss bin_width off-by-one
+
+In `src/mi_loss.jl`:
+```julia
+bin_width = range_val / T(num_bins - 1)  # ← Should be T(num_bins)
+```
+This creates ~1.6% error in bin assignment. Minor compared to the gradient bug, but should be fixed.
+
+### Secondary Issue: Unnecessary preprocessing
+
+For this specific data (same FOV, close origins), the preprocessing pipeline:
+- COM alignment: Introduces unnecessary translation (~2.5mm in Z)
+- FOV crop: Trims ~0.2% of the image (essentially no-op)
+- These add complexity without benefit for same-FOV data
+
+### Hypotheses Ranked
+
+1. **ROOT CAUSE (confirmed): Hardcoded MSE gradients in `_compute_loss_and_gradient!`**
+   - The optimizer never follows MI gradients. It computes MI forward but uses MSE backward.
+   - The backward pass for MI (Mooncake rrule!!) is never invoked during registration.
+   - Fix: Use the loss function's actual backward pass (Mooncake rrule!!) to compute d_moved.
+
+2. **Contributing: Grid_sample gradient chain may have issues**
+   - Even MSE registration fails (loss increases), suggesting the full backward chain
+     (loss → d_moved → _∇grid_sample_grid → _∇affine_grid_theta → _∇compose_affine)
+     may have additional bugs.
+   - Need to test: Does MSE registration work on a simple 2D test case?
+
+3. **Minor: MI bin_width off-by-one** (1.6% error, not primary cause)
+
+4. **Minor: Unnecessary preprocessing for same-FOV data** (adds complexity, not primary cause)
+
+### Updated Recommendations for FIX-MI-LOSS-001 and NOTEBOOK-SIMPLE-001
+
+**FIX-MI-LOSS-001 should be expanded to:**
+1. Fix the hardcoded MSE gradient in `_compute_loss_and_gradient!`
+2. Use Mooncake rrule!! or manual loss backward to compute proper d_moved
+3. Fix MI bin_width off-by-one
+4. Test that MI gradients actually point toward alignment
+5. Test that registration converges with MI loss
+
+**NOTEBOOK-SIMPLE-001 should be simplified to:**
+1. Since FOVs are the same, skip COM alignment and FOV crop entirely
+2. Just resample both to common grid and register directly
+3. Use more iterations since MI converges slower than MSE
+
+---

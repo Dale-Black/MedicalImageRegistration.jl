@@ -851,6 +851,128 @@
         "Update progress.md with final notebook status and any remaining issues"
       ],
       "files": ["examples/cardiac_ct.jl", "ralph_loop/progress.md"]
+    },
+    {
+      "id": "DIAG-DATA-001",
+      "type": "RESEARCH",
+      "title": "Diagnose: Actually inspect the DICOM data and compute FOV overlap",
+      "status": "done",
+      "priority": 36,
+      "blockedBy": ["NOTEBOOK-VALIDATE-001"],
+      "description": "STOP ASSUMING. START MEASURING. The registration is failing because we built preprocessing based on assumptions (different FOV, needing COM alignment, etc.) but the user says the images actually have the SAME FOV. We need to actually LOOK at the data. Run the notebook, print every piece of metadata, and COMPUTE whether FOVs match. The current notebook produces garbage results (screenshot shows no alignment improvement). This story must diagnose the ROOT CAUSE.",
+      "acceptanceCriteria": [
+        "RUN the notebook and capture the ACTUAL printed output for both volumes",
+        "COMPUTE from DICOM metadata: origin, spacing, physical extent for BOTH images",
+        "COMPARE: Do the FOVs actually overlap? By how much? Are they the same?",
+        "COMPARE: Are the origins close? How far apart in mm?",
+        "CHECK: After COM alignment, what translation was applied? Was it reasonable?",
+        "CHECK: After crop_to_overlap, did the images get SMALLER? Were they supposed to?",
+        "CHECK: After resample to 2mm, what are the actual output sizes?",
+        "CHECK: Is the resampled CCTA slice showing the SAME anatomy as the resampled NC slice?",
+        "HYPOTHESIS: List top 3 most likely reasons registration is failing",
+        "For each hypothesis, describe how to test it",
+        "Document ALL findings in progress.md with ACTUAL NUMBERS from the data",
+        "**UPDATE prd.json**: Modify FIX stories based on what is actually wrong",
+        "DO NOT WRITE CODE. Just analyze the notebook output and existing code."
+      ],
+      "diagnosticResult": {
+        "rootCause": "HARDCODED MSE GRADIENTS in _compute_loss_and_gradient! (src/affine.jl:300-327). The function always computes MSE gradients regardless of which loss_fn is passed. When MI loss is used, forward pass computes MI correctly but backward pass uses MSE gradient d_moved = 2*(moved-static)/n, which points in the WRONG direction for multi-modal registration.",
+        "dataFindings": {
+          "fov": "SAME - both 184.76×184.76mm XY, NC 140mm Z vs CCTA 145mm Z",
+          "origins": "CLOSE - only 2.5mm apart (mostly Z offset)",
+          "overlap": "99.8% XY, 96-100% Z",
+          "resolution": "Same XY (0.3609mm), Z ratio 5.5x (NC 2.0mm vs CCTA 0.361mm)",
+          "preprocessingNeeded": "MINIMAL - just resample to common grid, NO COM alignment needed"
+        },
+        "secondaryIssues": [
+          "MI bin_width = range/(num_bins-1) should be range/num_bins (~1.6% error)",
+          "Even MSE registration fails (loss increases) suggesting gradient chain may have additional issues",
+          "Unnecessary preprocessing (COM alignment, FOV crop) for same-FOV data"
+        ]
+      },
+      "files": ["ralph_loop/progress.md", "ralph_loop/prd.json"]
+    },
+    {
+      "id": "FIX-GRADIENT-001",
+      "type": "IMPL",
+      "title": "Fix hardcoded MSE gradients in _compute_loss_and_gradient!",
+      "status": "pending",
+      "priority": 37,
+      "blockedBy": ["DIAG-DATA-001"],
+      "description": "ROOT CAUSE FIX. The function _compute_loss_and_gradient! in src/affine.jl ALWAYS computes MSE gradients (d_moved = 2*(moved-static)/n) regardless of what loss_fn is passed. This means MI loss, NCC loss, and any custom loss function have their gradients IGNORED during registration. The fix must use the actual loss function's backward pass (Mooncake rrule!!) to compute d_moved. This is THE critical bug preventing registration from working with any loss except MSE.",
+      "acceptanceCriteria": [
+        "Modify _compute_loss_and_gradient! to use Mooncake's value_and_pullback!! or rrule!! for the loss function",
+        "The gradient d_moved must come from the ACTUAL loss function's backward pass, NOT hardcoded MSE",
+        "Alternative approach: use Mooncake.build_rrule to get pullback for any loss function",
+        "Test: MSE loss still works (backward compatible)",
+        "Test: MI loss produces correct gradients (d_moved different from MSE gradient)",
+        "Test: Registration with MI loss on known shifted pair - loss DECREASES",
+        "Test: Registration with MSE loss on known shifted pair - loss DECREASES",
+        "Test: Registration with MI loss converges to correct alignment on 24^3 test pair",
+        "Test: Registration on multi-modal (contrast) test pair converges with MI loss",
+        "Verify on MtlArrays (GPU)",
+        "If Mooncake rrule!! for generic loss is too complex, add explicit loss-specific backward functions and dispatch"
+      ],
+      "files": ["src/affine.jl", "test/test_affine.jl"]
+    },
+    {
+      "id": "FIX-MI-LOSS-001",
+      "type": "IMPL",
+      "title": "Fix MI loss bin_width off-by-one and verify gradients",
+      "status": "pending",
+      "priority": 38,
+      "blockedBy": ["FIX-GRADIENT-001"],
+      "description": "Fix the minor bin_width calculation bug in mi_loss.jl and verify that MI gradients work correctly now that FIX-GRADIENT-001 has fixed the gradient pipeline. The bin_width = range / (num_bins - 1) should be range / num_bins.",
+      "acceptanceCriteria": [
+        "Fix bin_width calculation in _mi_loss_impl: range / num_bins (not num_bins - 1)",
+        "Fix same issue in _nmi_loss_impl",
+        "Fix same issue in rrule!! backward pass (both mi_loss and nmi_loss)",
+        "Add test: Two identical images should have MI = H(X) (maximum possible)",
+        "Add test: Gradually shifted image should have decreasing MI",
+        "Add test: Verify MI gradient points in correct direction (toward alignment)",
+        "Add test: Full registration with MI loss converges on multi-modal pair",
+        "Test on MtlArrays"
+      ],
+      "files": ["src/mi_loss.jl", "test/test_mi_loss.jl"]
+    },
+    {
+      "id": "NOTEBOOK-SIMPLE-001",
+      "type": "IMPL",
+      "title": "Rewrite cardiac_ct.jl with simplest possible registration",
+      "status": "pending",
+      "priority": 39,
+      "blockedBy": ["FIX-MI-LOSS-001"],
+      "description": "After fixing the gradient bug and MI loss, rewrite the notebook with the simplest possible approach. DIAG-DATA-001 confirmed: FOVs are the SAME (184.76mm XY), origins are CLOSE (2.5mm apart), overlap is ~100%. Preprocessing is UNNECESSARY. Just resample both to common grid and register directly.",
+      "acceptanceCriteria": [
+        "SECTION 1 - Data Inspection (NO preprocessing, just look at data):",
+        "  - Print both origins, spacings, sizes, physical extents side by side",
+        "  - COMPUTE FOV overlap percentage from the actual numbers",
+        "  - Print: 'FOV overlap: X%' and 'Translation between origins: (dx, dy, dz) mm'",
+        "  - Visualize: Pick MATCHING physical z-position (not just middle slice!) from both volumes",
+        "  - Show side-by-side slices at SAME physical location",
+        "SECTION 2 - Minimal Preprocessing (based on DIAG-DATA-001 findings):",
+        "  - FOVs are SAME: skip COM alignment and FOV cropping",
+        "  - Just resample both to 2mm isotropic",
+        "  - Print what was done and why",
+        "  - Visualize resampled pair side-by-side at matching Z",
+        "SECTION 3 - Registration:",
+        "  - Use MIR.AffineRegistration directly on the resampled pair",
+        "  - Use MIR.mi_loss (now fixed with proper gradients)",
+        "  - scales=(4,2,1), iterations=(200,100,50)",
+        "  - learning_rate=0.005f0",
+        "  - Print loss at each scale level - MUST show decreasing loss",
+        "  - Print learned affine matrix",
+        "  - Visualize: before/after at SAME z-position as Section 1",
+        "SECTION 4 - Evaluation:",
+        "  - Checkerboard overlay before/after",
+        "  - Difference image before/after",
+        "  - MI metric before/after (MUST show improvement)",
+        "  - Slider to browse all slices",
+        "CRITICAL: Registration MUST show visible improvement (unlike previous broken versions)",
+        "CRITICAL: Loss MUST decrease during optimization",
+        "Notebook must run end-to-end without errors"
+      ],
+      "files": ["examples/cardiac_ct.jl"]
     }
   ]
 }
