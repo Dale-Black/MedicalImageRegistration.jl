@@ -7662,3 +7662,57 @@ Changed `range_val / T(num_bins - 1)` to `range_val / T(num_bins)` in 6 location
 - ✓ All tests on MtlArrays
 
 ---
+
+## [NOTEBOOK-SIMPLE-001] Rewrite cardiac_ct.jl with simplest possible registration
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+### Summary
+
+Rewrote `examples/cardiac_ct.jl` based on DIAG-DATA-001 findings: FOVs are the SAME (184.76mm XY), origins are CLOSE (2.5mm apart), overlap is ~100%. Previous notebook had complex unnecessary preprocessing (COM alignment, FOV cropping). New notebook is minimal and focused.
+
+### Structure (4 Sections)
+
+1. **Data Inspection** - Print metadata for both volumes, compute FOV overlap percentage, show matching slices at same physical z-position
+2. **Minimal Preprocessing** - Just resample both to 2mm isotropic (handles z-spacing mismatch: NC 2.0mm vs CCTA 0.361mm). Skip COM alignment and FOV cropping entirely.
+3. **Registration** - AffineRegistration with MI loss, scales=(4,2,1), iterations=(200,100,50), lr=0.005. Handles size mismatch from rounding via identity affine resampling. Shows loss progression by scale level and learned affine matrix.
+4. **Evaluation** - Checkerboard overlay before/after, difference image, MI metric comparison, interactive slice browser.
+
+### Key Design Decisions
+
+- Uses `import MedicalImageRegistration as MIR` (qualified access)
+- Creates PhysicalImage objects from DICOM metadata for proper physical coordinate handling
+- Uses `MIR.resample()` for resampling to common isotropic grid
+- Handles potential size mismatch between resampled volumes via identity affine + grid_sample
+- All visualization uses CairoMakie with consistent HU window (-200, 400) and :grays colormap
+- Interactive PlutoUI slider for browsing all registered slices
+
+### API Calls Verified
+
+- ✓ MIR.PhysicalImage(data; spacing=..., origin=...)
+- ✓ MIR.spatial_size() / MIR.spatial_spacing()
+- ✓ MIR.resample(physical_image, target_spacing; interpolation=:bilinear)
+- ✓ MIR.affine_grid(theta, size; align_corners=true)
+- ✓ MIR.grid_sample(data, grid; padding_mode=:border, align_corners=true)
+- ✓ MIR.AffineRegistration{Float32}(...) constructor
+- ✓ MIR.register(reg, moving, static; loss_fn=MIR.mi_loss, verbose=true, final_interpolation=:bilinear)
+- ✓ MIR.mi_loss(a, b)
+- ✓ MIR.get_affine(reg)
+
+### Acceptance Criteria
+
+- ✓ Section 1: Data inspection with metadata comparison and FOV overlap
+- ✓ Section 1: Matching physical z-position visualization
+- ✓ Section 2: Minimal preprocessing (resample to 2mm only)
+- ✓ Section 2: Explanation of what was done and why
+- ✓ Section 3: AffineRegistration with MI loss
+- ✓ Section 3: Loss progression by scale level
+- ✓ Section 3: Learned affine matrix display
+- ✓ Section 3: Before/after visualization at matching z
+- ✓ Section 4: Checkerboard overlay before/after
+- ✓ Section 4: Difference image before/after
+- ✓ Section 4: MI metric before/after
+- ✓ Section 4: Interactive slice browser
+
+---

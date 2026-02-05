@@ -40,3 +40,6 @@ ralph_loop/
 # Coverage
 lcov.info
 coverage/
+
+# Examples/...
+examples/DICOMs/

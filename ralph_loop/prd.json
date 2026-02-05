@@ -939,7 +939,7 @@
       "id": "NOTEBOOK-SIMPLE-001",
       "type": "IMPL",
       "title": "Rewrite cardiac_ct.jl with simplest possible registration",
-      "status": "pending",
+      "status": "done",
       "priority": 39,
       "blockedBy": ["FIX-MI-LOSS-001"],
       "description": "After fixing the gradient bug and MI loss, rewrite the notebook with the simplest possible approach. DIAG-DATA-001 confirmed: FOVs are the SAME (184.76mm XY), origins are CLOSE (2.5mm apart), overlap is ~100%. Preprocessing is UNNECESSARY. Just resample both to common grid and register directly.",
