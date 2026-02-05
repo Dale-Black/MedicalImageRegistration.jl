@@ -362,7 +362,7 @@ function _mi_loss_impl(
     if range_val < eps
         range_val = one(T)
     end
-    bin_width = range_val / T(num_bins - 1)
+    bin_width = range_val / T(num_bins)
 
     # Allocate histograms
     joint_hist = similar(moving, num_bins, num_bins)
@@ -432,7 +432,7 @@ function _nmi_loss_impl(
     if range_val < eps
         range_val = one(T)
     end
-    bin_width = range_val / T(num_bins - 1)
+    bin_width = range_val / T(num_bins)
 
     # Allocate histograms
     joint_hist = similar(moving, num_bins, num_bins)
@@ -827,7 +827,7 @@ function Mooncake.rrule!!(
     if range_val < eps
         range_val = one(T)
     end
-    bin_width = range_val / T(num_bins - 1)
+    bin_width = range_val / T(num_bins)
 
     # Forward pass
     output = _mi_loss_impl(moving_primal, static_primal, num_bins, sigma_T, intensity_range)
@@ -876,7 +876,7 @@ function Mooncake.rrule!!(
     if range_val < eps
         range_val = one(T)
     end
-    bin_width = range_val / T(num_bins - 1)
+    bin_width = range_val / T(num_bins)
 
     output = _nmi_loss_impl(moving_primal, static_primal, num_bins, sigma_T, intensity_range)
     output_fdata = similar(output)

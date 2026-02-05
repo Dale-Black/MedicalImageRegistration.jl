@@ -7551,3 +7551,114 @@ For this specific data (same FOV, close origins), the preprocessing pipeline:
 3. Use more iterations since MI converges slower than MSE
 
 ---
+
+## [FIX-GRADIENT-001] Fix hardcoded MSE gradients in _compute_loss_and_gradient!
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+### Root Cause
+
+The function `_compute_loss_and_gradient!` in `src/affine.jl` was hardcoded to always compute MSE gradients (`d_moved = 2*(moved-static)/n`) regardless of what `loss_fn` was passed. This meant:
+- Forward pass computed the correct loss (MI, NCC, etc.)
+- Backward pass ALWAYS used MSE gradient
+- Registration with MI loss was actually optimizing MSE in the wrong direction
+
+### Fix Applied
+
+Replaced the hardcoded MSE gradient with a dispatch-based system using multiple dispatch on `_loss_backward!`:
+
+```julia
+function _compute_loss_and_gradient!(d_moved, moved, static, loss_fn)
+    loss_arr = loss_fn(moved, static)
+    d_loss_arr = similar(loss_arr)
+    fill!(d_loss_arr, one(T))
+    d_static_dummy = similar(static)
+    fill!(d_static_dummy, zero(T))
+    _loss_backward!(d_moved, d_static_dummy, d_loss_arr, moved, static, loss_fn)
+    loss_val = AK.reduce(+, loss_arr; init=zero(T))
+    return loss_val
+end
+```
+
+Added `_loss_backward!` methods for:
+- `mse_loss` → calls `_∇mse_loss!`
+- `mi_loss` → computes min/max, bin_width, calls `_∇mi_loss!`
+- `nmi_loss` → computes min/max, bin_width, calls `_∇nmi_loss!`
+- `ncc_loss` → calls `_∇ncc_loss_3d!`
+- Generic fallback → warns and uses MSE
+
+Also added small random perturbation (±0.01) to initial translation parameters to avoid landing on integer pixel coordinates where bilinear interpolation gradient is unreliable.
+
+### Verification Results (MtlArray GPU)
+
+- **MSE registration**: Loss 0.0051 → 0.00008 (98.4% decrease) ✓
+- **MI registration**: Loss -0.53 → -0.96 (MI increased toward alignment) ✓
+- **NMI registration**: Loss -0.28 → -0.37 (NMI increased) ✓
+- **Multi-modal MI**: Loss decreased, correct translation recovered ✓
+- **25 GPU tests pass** ✓
+
+### Acceptance Criteria
+
+- ✓ Gradient d_moved comes from actual loss function's backward pass
+- ✓ MSE loss still works (backward compatible)
+- ✓ MI loss produces correct gradients
+- ✓ Registration with MI on shifted pair - loss DECREASES
+- ✓ Registration with MSE on shifted pair - loss DECREASES
+- ✓ Registration converges to correct alignment on 16³ test pair
+- ✓ Multi-modal registration converges with MI loss
+- ✓ Verified on MtlArrays (GPU)
+- ✓ Used loss-specific backward dispatch (not generic Mooncake)
+
+---
+
+## [FIX-MI-LOSS-001] Fix MI loss bin_width off-by-one and verify gradients
+
+**Status:** DONE
+**Date:** 2026-02-04
+
+### Bug
+
+The bin_width calculation in MI loss was:
+```julia
+bin_width = range_val / T(num_bins - 1)  # WRONG
+```
+
+Should be:
+```julia
+bin_width = range_val / T(num_bins)  # CORRECT
+```
+
+The off-by-one caused bins to be ~1.6% wider than correct, making the last bin extend beyond the data range.
+
+### Fix Applied
+
+Changed `range_val / T(num_bins - 1)` to `range_val / T(num_bins)` in 6 locations:
+1. `_mi_loss_impl` forward pass
+2. `_nmi_loss_impl` forward pass
+3. `rrule!!` for `mi_loss` backward pass
+4. `rrule!!` for `nmi_loss` backward pass
+5. `_loss_backward!` for `mi_loss` in `affine.jl`
+6. `_loss_backward!` for `nmi_loss` in `affine.jl`
+
+### Verification
+
+- 56 MI loss tests pass (26 mi_loss + 13 nmi_loss + 4 multi-modal + 9 sensitivity + 4 dimensions)
+- Identical images give MI ≈ -2.34 (strongly negative = maximum MI)
+- MI correctly increases (less negative) with misalignment
+- MI gradient points in correct direction
+- Multi-modal registration converges
+- All verified on MtlArrays (GPU)
+
+### Acceptance Criteria
+
+- ✓ Fix bin_width in `_mi_loss_impl`
+- ✓ Fix bin_width in `_nmi_loss_impl`
+- ✓ Fix bin_width in rrule!! backward passes
+- ✓ Identical images have maximum MI
+- ✓ Gradually shifted image has decreasing MI (increasing loss)
+- ✓ MI gradient points toward alignment
+- ✓ Full registration with MI converges on multi-modal pair
+- ✓ All tests on MtlArrays
+
+---

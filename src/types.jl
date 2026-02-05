@@ -107,8 +107,10 @@ function AffineRegistration{T}(;
     # Initialize parameters on CPU first, then convert to target array type
     # This avoids scalar indexing on GPU arrays
 
-    # Translation: zeros (no initial translation)
-    translation_cpu = zeros(T, D, N)
+    # Translation: small random perturbation to avoid integer pixel coordinates
+    # At exactly zero translation, grid points land on integer pixel coords where
+    # the piecewise-linear interpolation gradient is unreliable
+    translation_cpu = T(0.01) .* randn(T, D, N)
 
     # Rotation: identity matrix
     rotation_cpu = zeros(T, D, D, N)
@@ -149,13 +151,22 @@ end
 """
     reset!(reg::AffineRegistration{T}) where T
 
-Reset parameters to identity transformation.
+Reset parameters to identity transformation with small random perturbation.
+
+The translation is initialized with a small random value (±0.01) instead of
+exactly zero to avoid landing on integer pixel coordinates in the grid, where
+the piecewise-linear interpolation gradient is unreliable (one-sided difference
+can have wrong sign/magnitude vs the true descent direction).
 """
 function reset!(reg::AffineRegistration{T}) where T
     D = reg.is_3d ? 3 : 2
     N = size(reg.translation, 2)
 
-    fill!(reg.translation, zero(T))
+    # Small random perturbation to avoid integer pixel coordinates
+    # This ensures grid_sample backward produces correct gradients from the start
+    translation_cpu = T(0.01) .* randn(T, D, N)
+    copyto!(reg.translation, translation_cpu)
+
     fill!(reg.zoom, one(T))
     fill!(reg.shear, zero(T))
 

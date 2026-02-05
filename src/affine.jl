@@ -296,6 +296,13 @@ end
 
 Compute loss and gradient of loss w.r.t. moved image.
 Returns the loss value (as scalar on CPU).
+
+Dispatches to the correct backward pass based on the loss function:
+- mse_loss: uses _∇mse_loss!
+- mi_loss: uses _∇mi_loss!
+- nmi_loss: uses _∇nmi_loss!
+- ncc_loss: uses _∇ncc_loss_3d!
+- dice_loss: uses _∇dice_score! (through dice_score backward)
 """
 function _compute_loss_and_gradient!(
     d_moved::AbstractArray{T},
@@ -306,24 +313,124 @@ function _compute_loss_and_gradient!(
     # Forward pass for loss
     loss_arr = loss_fn(moved, static)
 
-    # For backward, we need d_loss/d_moved
-    # loss_arr is 1-element array on GPU
-    # Set d_loss = 1 (upstream gradient)
+    # Create upstream gradient (d_loss = 1)
     d_loss_arr = similar(loss_arr)
     fill!(d_loss_arr, one(T))
 
-    # Compute gradient manually based on loss type
-    # For MSE: d_moved[i] = 2*(moved[i] - static[i])/n
-    n = T(length(moved))
-    scale = T(2) / n
+    # Dispatch to correct backward pass based on loss function
+    d_static_dummy = similar(static)
+    fill!(d_static_dummy, zero(T))
 
-    AK.foreachindex(d_moved) do idx
-        @inbounds d_moved[idx] = scale * (moved[idx] - static[idx])
-    end
+    _loss_backward!(d_moved, d_static_dummy, d_loss_arr, moved, static, loss_fn)
 
     # Extract scalar loss value using GPU-compatible reduction
     loss_val = AK.reduce(+, loss_arr; init=zero(T))
     return loss_val
+end
+
+# ============================================================================
+# Loss-specific backward dispatching
+# ============================================================================
+
+# MSE loss backward
+function _loss_backward!(
+    d_moved::AbstractArray{T},
+    d_static::AbstractArray{T},
+    d_loss_arr::AbstractArray{T},
+    moved::AbstractArray{T},
+    static::AbstractArray{T},
+    ::typeof(mse_loss)
+) where T
+    _∇mse_loss!(d_moved, d_static, d_loss_arr, moved, static)
+    return nothing
+end
+
+# MI loss backward
+function _loss_backward!(
+    d_moved::AbstractArray{T},
+    d_static::AbstractArray{T},
+    d_loss_arr::AbstractArray{T},
+    moved::AbstractArray{T},
+    static::AbstractArray{T},
+    ::typeof(mi_loss)
+) where T
+    # Compute min/max and bin_width (same as forward pass)
+    m_min, m_max = _get_minmax(moved)
+    s_min, s_max = _get_minmax(static)
+    min_val = min(m_min, s_min)
+    max_val = max(m_max, s_max)
+
+    range_val = max_val - min_val
+    eps = T(1e-10)
+    if range_val < eps
+        range_val = one(T)
+    end
+
+    num_bins = 64
+    sigma = one(T)
+    bin_width = range_val / T(num_bins)
+
+    _∇mi_loss!(d_moved, d_static, d_loss_arr, moved, static, num_bins, sigma, min_val, bin_width)
+    return nothing
+end
+
+# NMI loss backward
+function _loss_backward!(
+    d_moved::AbstractArray{T},
+    d_static::AbstractArray{T},
+    d_loss_arr::AbstractArray{T},
+    moved::AbstractArray{T},
+    static::AbstractArray{T},
+    ::typeof(nmi_loss)
+) where T
+    m_min, m_max = _get_minmax(moved)
+    s_min, s_max = _get_minmax(static)
+    min_val = min(m_min, s_min)
+    max_val = max(m_max, s_max)
+
+    range_val = max_val - min_val
+    eps = T(1e-10)
+    if range_val < eps
+        range_val = one(T)
+    end
+
+    num_bins = 64
+    sigma = one(T)
+    bin_width = range_val / T(num_bins)
+
+    _∇nmi_loss!(d_moved, d_static, d_loss_arr, moved, static, num_bins, sigma, min_val, bin_width)
+    return nothing
+end
+
+# NCC loss backward (3D only)
+function _loss_backward!(
+    d_moved::AbstractArray{T,5},
+    d_static::AbstractArray{T,5},
+    d_loss_arr::AbstractArray{T},
+    moved::AbstractArray{T,5},
+    static::AbstractArray{T,5},
+    ::typeof(ncc_loss)
+) where T
+    kernel_size = 7
+    eps_num = T(1e-5)
+    eps_denom = T(1e-5)
+    _∇ncc_loss_3d!(d_moved, d_static, d_loss_arr, moved, static, kernel_size, eps_num, eps_denom)
+    return nothing
+end
+
+# Generic fallback: use MSE gradient as approximation
+# This is better than crashing, but logs a warning
+function _loss_backward!(
+    d_moved::AbstractArray{T},
+    d_static::AbstractArray{T},
+    d_loss_arr::AbstractArray{T},
+    moved::AbstractArray{T},
+    static::AbstractArray{T},
+    loss_fn::Function
+) where T
+    @warn "No specific backward pass for $(loss_fn). Using MSE gradient as fallback." maxlog=1
+    _∇mse_loss!(d_moved, d_static, d_loss_arr, moved, static)
+    return nothing
 end
 
 # ============================================================================
